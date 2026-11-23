@@ -55,5 +55,5 @@ The effort involved in all of these tasks was substantially reduced through the 
 
 ## References
 
-Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. *Ocean Modelling*, **120**, 79–82. <https://doi.org/10.1016/j.ocemod.2017.10.008>
+- Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. *Ocean Modelling*, **120**, 79–82. <https://doi.org/10.1016/j.ocemod.2017.10.008>
 - Kelley, C. T., Keyes, D. E., 1998: Convergence analysis of pseudo-transient continuation. *SIAM J. Numer. Anal.*, **35**, 508–523. [doi:10.1137/S0036142996304796](https://doi.org/10.1137/S0036142996304796)
