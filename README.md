@@ -1,10 +1,8 @@
 # Veros 4° ocean spin-up
 
-Fenwick C. Cooper, University of Oxford, UK
-
 Our aim here is to spin up the Veros ocean model using the 4° configuration at <https://past2future.org/2026/09/11/ocean-model-spin-up-competition/>. The longer term goal is to find a method to spin up higher resolution models.
 
-We use the method put forward in [Cooper (2017)](#references) and adapted for this problem. Taking advantage of the fact that the velocity equilibrates at a faster rate than the temperature field, the basic method in [Cooper (2017)](#references) is:
+We use the method put forward in [Cooper (2017)](#references) and adapted for this problem. Taking advantage of the fact that the velocity equilibrates at a faster rate than the temperature field, the basic method in Cooper (2017) is:
 
 1. Run the ocean model for a short time to spin up to some extent and to bring fields into balance.
 2. Linearise the temperature tendency about the current state and implicitly solve for the equilibrium.
@@ -12,9 +10,9 @@ We use the method put forward in [Cooper (2017)](#references) and adapted for th
 
 The changes here include:
 
-- Unlike in [Cooper (2017)](#references), here the temperature feeds back strongly onto the velocity. As suggested in that paper, this was handled by inclusion of a linear equation for velocity, instantaneously slaved to the temperature.
-- The equilibrium solve used LU factorisation (affordable at 4°) instead of Bi-CGSTAB (used in [Cooper (2017)](#references) for higher resolution), combined with implicit pseudo-time stepping [(Kelley and Keyes, 1998)](#references) of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
-- At 4° resolution eddies are not resolved, enabling use of a linear equation for velocity. In an eddying flow, as in [Cooper (2017)](#references), time mean equations need to be used.
+- Unlike in Cooper (2017), here the temperature feeds back strongly onto the velocity. As suggested in that paper, this was handled by inclusion of a linear equation for velocity, instantaneously slaved to the temperature.
+- The equilibrium solve used LU factorisation (affordable at 4°) instead of Bi-CGSTAB (used in Cooper (2017) for higher resolution), combined with implicit pseudo-time stepping [(Kelley and Keyes, 1998)](#references) of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
+- At 4° resolution eddies are not resolved, enabling use of a linear equation for velocity. In an eddying flow, as in Cooper (2017), time mean equations need to be used.
 
 ## Results
 
