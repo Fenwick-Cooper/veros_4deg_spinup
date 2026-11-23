@@ -1,0 +1,816 @@
+\documentclass{article}
+    % General document formatting
+    \usepackage[margin=0.7in]{geometry}
+    \usepackage[parfill]{parskip}
+    \usepackage[utf8]{inputenc}
+
+    % Related to math
+    \usepackage{amsmath,amssymb,amsfonts,amsthm}
+
+    % Others
+    \usepackage{graphicx}
+    \usepackage{booktabs}
+    \setlength{\aboverulesep}{0pt}
+    \setlength{\belowrulesep}{0pt}
+    \usepackage{longtable}
+    \usepackage{array}
+    \usepackage{xcolor}
+    % \chg{} marks changes in red
+    \newcommand{\chg}[1]{{\color{red}#1}}
+    \usepackage{float}
+    \usepackage[square,numbers]{natbib}
+    \usepackage{url}
+    \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+\title{Accelerated spin-up by a coupled temperature--circulation solve}
+\author{Fenwick C. Cooper$^1$}
+\date{%
+    $^1$University of Oxford, UK \\[2ex]
+    \today
+}
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+This document, and the code and computations it reports, were produced almost entirely by the AI assistant Claude, following the human author's instructions over several iterations. The human author reviewed the text for clarity, relevance and quality, and takes responsibility for its content. Everything is specific to the setup in \url{https://past2future.org/2026/09/11/ocean-model-spin-up-competition/}.
+The model, grid, notation and every matrix referred to here are defined in \texttt{veros\_discretisation.tex} (``the discretisation document''); the score and the earlier experiments are in \texttt{equilibration\_experiments.tex} (``the earlier experiments'').
+Years are 360 model days throughout.
+
+%======================================================================
+\section{Summary}\label{sec:summary}
+%======================================================================
+
+\textbf{Aim.} Bring the 4$^\circ$ global Veros model from \texttt{Init\_state.restart.h5} to the point where its temperature score (Section~\ref{sec:setting}) is below $10^{-5}$ in fewer model days than conventional time stepping, which needs 3714 days, and, beyond that criterion, bring it genuinely closer to equilibrium.
+
+\textbf{Method.} The time-mean (here: steady) temperature equation is solved directly, as in \citet{cooper2017}, with one essential change: the circulation is not held fixed but is solved for together with the temperature, through a steady, linear form of the model's own momentum equations. The method is a loop:
+\begin{enumerate}
+\item Run Veros conventionally for ten to a few tens of days (the \emph{warm-up}).
+\item Take the turbulence energies (TKE and EKE) from the model state and hold them fixed. Solve the coupled steady problem ``temperature tendency $=0$, with the velocities in balance with the density of that temperature'' by a sequence of implicit pseudo-time steps whose length doubles from 45 days to tens of years (to a thousand years in the last round). Each step is one sparse linear solve in which temperature and velocity change together (Section~\ref{sec:method}).
+\item Write the solution into the model: temperature, the velocities and streamfunction that belong to it, and consistent time-stepping tendencies (Section~\ref{sec:patch}).
+\item Run Veros for 10--20 days so that the turbulence energies adjust to the new state, and repeat from step 2. Three rounds of 30--60 pseudo-years bring the upper ocean close to equilibrium; a fourth round of 2000 pseudo-years, with $\Delta\tau$ growing to 1024 years, brings the deep ocean there too.
+\item Run Veros conventionally until the score criterion is met.
+\end{enumerate}
+
+\textbf{Results.} Table~\ref{tab:headline} collects the main numbers. Distances are given from two references: $T_{200}$, the 200-year state against which the method was developed, and $T_{2000}$, the state after 2000 years of conventional Veros, which is much closer to equilibrium (Section~\ref{sec:2000}).
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|r|rr}
+\toprule
+ & crossing & \multicolumn{2}{c}{distance at crossing [$^\circ$C]} \\
+\cmidrule{3-4}
+Run & day & from $T_{200}$ & from $T_{2000}$ \\
+\midrule
+Conventional Veros (baseline) & 3714 & 0.61 & 0.65 \\
+Coupled solve at year 4, one round, 5 steps (Section~\ref{sec:exp4yr}) & 1643 & 0.39 & -- \\
+Coupled solve at year 4, one round, 9 steps (Section~\ref{sec:exp4yr}) & 1731 & 0.15 & -- \\
+Coupled solve at day 60, one round (Section~\ref{sec:scan}) & 330 & 0.29 & 0.38 \\
+Two rounds, days 20 and 40 (Section~\ref{sec:rounds}) & 182 & 0.14 & 0.27 \\
+Three rounds, days 20, 40 and 60 (Section~\ref{sec:final}) & 68 & 0.07 & 0.22 \\
+Three rounds, days 10, 20 and 30 (Section~\ref{sec:rounds}) & 67 & 0.09 & 0.22 \\
+\textbf{Four rounds, the last of 2000 pseudo-years} (Section~\ref{sec:long}) & 68$^{*}$ & 0.20 & \textbf{0.05} \\
+\textbf{Four rounds, days 10--40, the last of 2000 pseudo-years} (Section~\ref{sec:fast}) & \textbf{63} & 0.20 & 0.06 \\
+\midrule
+Conventional Veros after 200 years & & 0 & 0.21 \\
+Conventional Veros after 1000 years & & 0.17 & 0.05 \\
+\bottomrule
+\end{tabular}
+\caption{Crossing day: the model day, counted from \texttt{Init\_state.restart.h5}, on which the temperature score first falls below $10^{-5}$. Distance: the RMS difference over all ocean cells between the temperature on that day and the reference. The initial state is 1.29~$^\circ$C from $T_{200}$ and 1.30~$^\circ$C from $T_{2000}$. The states of Experiment~A at the crossing were not saved; 20 years after the restart they are 0.40 and 0.24~$^\circ$C from $T_{2000}$. For comparison, the frozen-velocity linear solve of the earlier experiments, applied at year 4, delayed the crossing to about year 38. $^{*}$The four-round run is identical to the three-round run until its fourth solve on day 80, so it meets the criterion on the same day, 68. Its distances are given for day 93, when the score is again below $10^{-5}$ after the fourth solve. The four-round run with 10-day gaps meets the criterion only after its long solve, so its distances are those of the state after all four rounds.}
+\label{tab:headline}
+\end{table}
+
+\begin{itemize}
+\item The criterion is met soonest, on day 63 (59 times sooner than the baseline), by the fastest configuration: solves on days 10, 20 and 30, and a long round of 2000 pseudo-years on day 40. It takes about 9.7 minutes of wall time. At the crossing the state is already 0.06~$^\circ$C from $T_{2000}$, as close to equilibrium as about 870 years of conventional Veros, and the score stays below $10^{-5}$ throughout the following ten years (Section~\ref{sec:fast}).
+\item The most accurate configuration uses 20-day gaps instead: solves on days 20, 40 and 60, and the long round on day 80. Its first three rounds meet the criterion on day 68, in a state only as close to equilibrium as 200 years of conventional Veros. The long round brings the state to 0.05~$^\circ$C from $T_{2000}$: as close to equilibrium as about 1000 years of conventional Veros (about 1400 years at the bottom level). After the fourth solve the score is below $10^{-5}$ again from day 93. The configuration takes about 13 minutes of wall time, against about 3 hours for those 1000 years of conventional Veros.
+\item Short gaps buy an early crossing; long gaps before the long round buy accuracy. The more time Veros has had to adjust the turbulence and circulation before the long round, the closer to $T_{2000}$ the long round ends: 0.061~$^\circ$C after 40 days, 0.057 after 50, 0.049 after 80. The difference persists through ten more years of Veros (0.046 against 0.037~$^\circ$C).
+\item The step that made the method work is solving for the circulation with the temperature. With frozen velocities the same linear solve makes the state four times worse (Section~\ref{sec:why}).
+\item Starting the solve directly from the initial state (no warm-up) fails. The initial state is not a consistent state of the model: its circulation and stored density belong to a non-uniform salinity, whereas the model's density depends on temperature alone. This causes a shock in the first days (a large convective adjustment and a change of circulation), and the solver cannot take long steps through it. Twenty to sixty days of conventional Veros are enough.
+\item Repeating the solve after the turbulence has adjusted matters as much as the solve itself (0.45, 0.27 and 0.22~$^\circ$C from $T_{2000}$ after one, two and three rounds), and so does the pseudo-time the last round covers: the deep ocean has e-folding times of centuries, and only a round that is long compared with them removes its error (from 0.51 to 0.03~$^\circ$C at the bottom level).
+\item The 200-year state is 0.21~$^\circ$C from $T_{2000}$, and 0.51~$^\circ$C at the bottom. The method was first tuned against it, and that tuning converged to $T_{200}$'s own errors; two observations that had looked like failures of the method (Sections~\ref{sec:exp4yr} and~\ref{sec:rounds}) turned out to be the method moving past $T_{200}$ towards equilibrium.
+\end{itemize}
+
+\textbf{What this does not show.}
+\begin{itemize}
+\item \emph{Wall time for the criterion.} At 4$^\circ$ a Veros day costs about 0.03--0.04~s and one coupled linear solve 15--25~s. The fastest configuration for the criterion takes about 9.7 minutes of wall time against 2.5 for the baseline (Section~\ref{sec:wall}). The method wins in wall time only when equilibrium, not the criterion, is the aim.
+\item \emph{Equilibrium below about 0.03~$^\circ$C.} $T_{2000}$ itself still drifts by about that much at depth, so the most accurate configuration's remaining 0.05~$^\circ$C (small-scale pattern near the surface, a uniform cold bias of about 0.02~$^\circ$C at depth) is near the limit of what can be measured (Section~\ref{sec:2000}).
+\item \emph{Generality.} Warm-up length, pseudo-time per round, number of rounds and the step limits were chosen for this one case, by looking at its results. Section~\ref{sec:choices} separates those choices from the ones a new problem would need.
+\end{itemize}
+
+%======================================================================
+\section{Setting, score and reference}\label{sec:setting}
+%======================================================================
+
+The model is the Veros global 4$^\circ$ setup of the discretisation document: $90\times40\times15$ cells, tracer time step $\Delta t = 86400$~s and momentum time step $\Delta t_m=1800$~s. Three properties of this setup are used below:
+\begin{itemize}
+\item Salinity is spatially uniform and has no surface flux, so it never changes and density depends on temperature alone.
+\item The forcing is steady (annual mean), so a steady state exists.
+\item The prognostic variables other than temperature are $u$, $v$, the streamfunction $\psi$, the turbulent kinetic energy $e$ (TKE) and the eddy kinetic energy $E$ (EKE). The mixing coefficients $\kappa_H$, $\kappa_M$, $K_\text{gm}$, $\kappa_\text{gm}$ are diagnosed from $e$, $E$ and the stratification $N^2$ at every step.
+\end{itemize}
+
+\textbf{Score.} As in the earlier experiments,
+\[
+\text{score} = \frac{\lVert \phi(T_\ast) - T_\ast \rVert}{\lVert T_\ast \rVert + \lVert T_0 \rVert},
+\]
+with $T_\ast$ the temperature at the start of a model day, $\phi(T_\ast)$ Veros's temperature one day (one step) later, $T_0$ the temperature of \texttt{Init\_state.restart.h5} and $\lVert\cdot\rVert$ the unweighted $L^2$ norm over the grid. The competition criterion is $\text{score}<10^{-5}$. Conventional Veros first meets it on day 3714 (it then returns above the threshold on 17 scattered days up to day 3905, and, as the 2000-year run showed, on 38 more days in two later episodes, in years 38--39 and 136--148).
+
+\textbf{Reference states and distance.} Two references are used. $T_{200}$ is the temperature of \texttt{spinup\_200\_72000.restart.h5}, the state after 200 years of conventional Veros. $T_{2000}$ is the state after 2000 years of the same run, made later (Section~\ref{sec:2000}). ``Distance'' means the root-mean-square of $T-T_{2000}$ (or of $T-T_{200}$ where stated) over all ocean cells (unweighted), in $^\circ$C; ``surface'' and ``bottom'' refer to the top and the deepest model level. The experiments were designed and tuned with $T_{200}$, which is 0.21~$^\circ$C from $T_{2000}$ overall and 0.51~$^\circ$C at the bottom level. $T_{200}$ is therefore a good reference for the upper ocean only, and several conclusions drawn from it at the time turned out to be wrong at depth; both distances are given where they differ in meaning. $T_{2000}$ is itself within about 0.01~$^\circ$C of equilibrium in the volume mean and 0.03~$^\circ$C at 2000--3000~m (Section~\ref{sec:2000}), so distances from it below about 0.03~$^\circ$C cannot be interpreted.
+
+\textbf{The score is not a measure of equilibrium.} When the baseline meets the criterion on day 3714 it is 0.65~$^\circ$C from $T_{2000}$, having started 1.30~$^\circ$C away; its distances at years 50, 100, 200 and 500 are 0.42, 0.26, 0.21 and 0.12~$^\circ$C. Every result below is therefore reported both as a day and as a distance.
+
+%======================================================================
+\section{Why the frozen-velocity solve fails here}\label{sec:why}
+%======================================================================
+
+\citet{cooper2017} accelerated the spin-up of a wind-driven gyre (MITgcm, 3840~km box, 500~m deep, linear equation of state) by solving the time-mean temperature equation as a linear system, with the time-mean velocities and eddy terms taken from a short model run and held fixed. The paper notes that this relies on the coupling being nearly one-sided, from the flow to the temperature, and suggests ``a similar linearized equation for the velocity'' where it is not.
+
+The same solve in this setup is
+\begin{equation}
+\mathsf{A}_T\, T = -\mathbf{b}, \qquad \mathsf{A}_T = \mathsf{M} + \mathsf{E} + \mathsf{D}_{33} + \mathsf{F} + \mathsf{D} + \mathsf{R},
+\label{eq:frozen}
+\end{equation}
+with the advection matrix $\mathsf{M}$ (built from $u,v,w$), the isoneutral matrices $\mathsf{E}$ and $\mathsf{D}_{33}$ (from the isoneutral slopes), the GM matrix $\mathsf{F}$ (slopes and $K_\text{gm}$), vertical diffusion $\mathsf{D}$ ($\kappa_H$), and surface relaxation $\mathsf{R}$ and forcing $\mathbf{b}$, all as constructed in the discretisation document and all taken from the model state after 4 years. Table~\ref{tab:swap} shows the result, and what happens when groups of coefficients are replaced by their values in the 200-year state. The distances in this section are from $T_{200}$; they compare variants of one solve with each other, a comparison that $T_{2000}$ would not change (the 4-year state is 0.85~$^\circ$C from $T_{2000}$).
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|r}
+\toprule
+Temperature field & distance [$^\circ$C] \\
+\midrule
+Initial state & 1.29 \\
+Veros after 4 years & 0.83 \\
+\midrule
+Solve~\eqref{eq:frozen}, all coefficients from the 4-year state & 3.37 \\
+\quad the same, but $\kappa_H$ from the 200-year state & 3.35 \\
+\quad the same, but slopes, $N^2$ and EKE from the 200-year state & 3.61 \\
+\quad the same, but $u,v,w$ from the 200-year state & 0.58 \\
+\quad all coefficients from the 200-year state & 0.34 \\
+Best damped step $T_\text{4yr} + \alpha\,(T_\text{solve}-T_\text{4yr})$, $\alpha=0.076$ & 0.79 \\
+\bottomrule
+\end{tabular}
+\caption{Distance from the 200-year state of the frozen-coefficient solve~\eqref{eq:frozen} and of variants of it. The plain solve is 5.4~$^\circ$C in error at the bottom level; plots of the surface alone hide this, because surface relaxation pins the surface.}
+\label{tab:swap}
+\end{table}
+
+Three conclusions follow.
+\begin{itemize}
+\item \emph{The velocities are the obstacle, not the eddy parameterisations.} Replacing the velocities is the only change that repairs the solve.
+\item \emph{The velocities are not spun up ahead of the temperature.} After 4 years $u$, $v$ and $w$ differ from their 200-year values by 41\%, 76\% and 83\% (relative $L^2$ difference), no closer than in the initial state (41\%, 68\%, 96\%). In \citet{cooper2017} the corresponding figures were 14\% and 7\%. Here the circulation is largely set by the density field, so it cannot converge before the temperature does.
+\item \emph{No damping rescues the frozen solve:} the best step along its increment improves the state from 0.83 to only 0.79~$^\circ$C.
+\end{itemize}
+
+\textbf{Is the velocity a simple function of temperature?} Veros was run with temperature clamped to $T_a$ (the 4-year state), to $T_b$ (the 200-year state) and to their average, each until the circulation settled (3000 days). If the settled circulation were a linear function of temperature, the third run would be the average of the first two. The departure from that, as a fraction of the difference between the first two runs, is 5\% for $u$ and $v$, 1\% for $\psi$ and 13\% for $w$, but 35\% for EKE and about 100\% for TKE, $\kappa_H$ and $\kappa_M$ (which switch on and off with convection). So the circulation can be treated as a nearly linear, diagnostic function of temperature, provided the turbulence closures are handled separately.
+
+%======================================================================
+\section{Method}\label{sec:method}
+%======================================================================
+
+\subsection{The coupled steady problem}\label{sec:problem}
+
+The temperature tendency is written as a function of temperature alone,
+\begin{equation}
+\mathbf{g}(T) = \Big[ \mathsf{M}\big(\mathbf{u}(T)\big) + \mathsf{E}(T) + \mathsf{D}_{33}(T) + \mathsf{F}(T) + \mathsf{D}(T) + \mathsf{R}(T) \Big]\, T + \mathbf{b}(T),
+\label{eq:g}
+\end{equation}
+and the aim is $\mathbf{g}(T)=0$. Compared with~\eqref{eq:frozen}, everything that Veros diagnoses from temperature is now a function of the unknown:
+\begin{itemize}
+\item $\mathbf{u}(T) = (u,v,w)$ is the steady circulation for the density of $T$ (Section~\ref{sec:momentum_op}).
+\item $\mathsf{E}$, $\mathsf{D}_{33}$ and $\mathsf{F}$ use the isoneutral slopes of $T$ itself.
+\item $\mathsf{R}$ and $\mathbf{b}$ use the sea-ice mask of $T$ itself ($T<-1.8~^\circ$C at the surface).
+\item $\mathsf{D}$ and the coefficients $K_\text{gm}$, $\kappa_M$, $\kappa_\text{gm}$ depend on the turbulence closures, treated in Section~\ref{sec:closures}.
+\end{itemize}
+Veros applies the terms of~\eqref{eq:g} one after another, some implicitly, so a zero of $\mathbf{g}$ is a fixed point of the Veros step only up to operator-splitting terms. No attempt is made to include those: whatever mismatch remains is removed by the Veros steps that follow the solve.
+
+\subsection{The steady momentum operator}\label{sec:momentum_op}
+
+Veros's momentum equations (discretisation document, Section ``Momentum'') are
+\[
+\frac{\partial (u,v)}{\partial t} = \text{Coriolis} + \text{wind stress} + \text{advection} + \text{friction} - \nabla p_\text{hydro} - \nabla p_s ,
+\]
+where both pressures are divided by the reference density $\rho_0 = 1024$~kg\,m$^{-3}$ (in units of m$^2$\,s$^{-2}$).
+$p_\text{hydro}$ is the hydrostatic pressure of the density anomaly, integrated down from the surface,
+\[
+p_\text{hydro}(x,y,z) = \frac{g}{\rho_0}\int_z^0 \big[\rho(x,y,z') - \rho_0\big]\,dz',
+\]
+with $\rho$ the in-situ density from the TEOS-10 equation of state at the temperature and salinity of each cell and a fixed pressure of $|z|$~dbar (decibars, the oceanographic unit of pressure: 1~dbar $=10^4$~Pa, close to the increase in hydrostatic pressure over 1~m of sea water, so that the pressure in dbar is numerically about the depth in metres; Veros evaluates the density at this fixed pressure rather than the actual one). In the model the integral starts at the surface with the top cell's density down to the top tracer point (35~m), and continues by the trapezoidal rule between tracer points (discretisation document, Section ``Density and hydrostatic pressure''). It is linear in $\rho$ and changes with depth; it carries the whole effect of temperature on the circulation.
+$p_s$ is the remaining, depth-independent pressure (the pressure at the rigid lid). It is never formed in the model: the depth-mean flow comes from the streamfunction. That is equivalent to choosing $p_s$ so that the depth-integrated flow is non-divergent (rigid lid). Setting the time derivative to zero in the matrix form of the momentum equations (discretisation document, Section ``Matrix representation of the momentum equations''), and leaving out the advection and metric matrices, gives a linear system for $\mathbf{x} = (u, v, p_s)$,
+\begin{equation}
+\mathsf{K}\,\mathbf{x} \equiv
+\begin{pmatrix}
+\mathsf{F}_u & \mathsf{C}_{uv} & \mathsf{G}_u \\
+\mathsf{C}_{vu} & \mathsf{F}_v & \mathsf{G}_v \\
+\mathsf{D}_u & \mathsf{D}_v & 0
+\end{pmatrix}
+\begin{pmatrix} u \\ v \\ p_s \end{pmatrix}
+= -\begin{pmatrix} \mathbf{f}_u \\ \mathbf{f}_v \\ 0 \end{pmatrix},
+\qquad
+\mathbf{f} = \mathbf{f}_\tau + \mathsf{P}\,\rho(T),
+\label{eq:K}
+\end{equation}
+with $\mathsf{C}$ the Coriolis term, $\mathsf{F}_{u,v}$ friction, $\mathsf{G}$ the gradient of $p_s$, $\mathsf{D}_{u,v}$ the depth-integrated divergence, $\mathbf{f}_\tau$ the wind stress acting on the top layer, and $\mathsf{P}$ the hydrostatic integral followed by the horizontal gradient, so that $\mathsf{P}\rho = -\nabla p_\text{hydro}$ (here $\rho$ is the anomaly $\rho-\rho_0$). For fixed friction coefficients, $\mathbf{x}$ is therefore an affine function of the density (a linear function plus a constant term, here the circulation driven by the wind alone), $\mathbf{x} = -\mathsf{K}^{-1}\big(\mathbf{f}_\tau + \mathsf{P}\rho(T)\big)$: the circulation is a diagnostic of temperature, non-linear only through the equation of state (and, in Section~\ref{sec:closures}, through the friction coefficients' dependence on $N^2$). $w$ follows from continuity, $w = \mathsf{W}_u u + \mathsf{W}_v v$. Every block is a direct transcription of Veros's discrete operator on the C grid. The points that needed care are these:
+\begin{itemize}
+\item \emph{Rigid lid instead of a streamfunction.} Using $p_s$ with the constraint row $\mathsf{D}_u u + \mathsf{D}_v v=0$ handles islands automatically. $p_s$ is defined up to a constant in each basin that is closed at the surface, so one $p_s$ value per connected basin is fixed at zero.
+\item \emph{Vertical friction is not $\partial_z[(\kappa_M+\kappa_\text{gm})\partial_z]$.} Veros applies the two vertical frictions (TKE viscosity $\kappa_M$, then the eddy ``TEM'' viscosity $\kappa_\text{gm}$) implicitly, one after the other, over the momentum time step. The tendency this produces is
+\[
+\mathsf{F}^z = \frac{(\mathsf{I} - \Delta t_m\mathsf{A}[\kappa_\text{gm}])^{-1}(\mathsf{I} - \Delta t_m\mathsf{A}[\kappa_M])^{-1} - \mathsf{I}}{\Delta t_m},
+\]
+with $\mathsf{A}[\kappa_M]$, $\mathsf{A}[\kappa_\text{gm}]$ the two tridiagonal diffusion operators. With $\kappa_M$ up to 100~m$^2$\,s$^{-1}$ this differs greatly from $\mathsf{A}[\kappa_M]+\mathsf{A}[\kappa_\text{gm}]$, and the steady state of the model depends on $\Delta t_m$. $\mathsf{F}^z$ is built exactly as above, as a dense $15\times15$ block per column.
+\item \emph{Left out:} momentum advection and the spherical metric terms, the only terms non-linear in $(u,v)$. They are about 0.1\% of the Coriolis term here.
+\end{itemize}
+$\mathsf{K}$ has 54{,}675 unknowns and $1.3\times10^{6}$ non-zeros; it is factorised once for given $\kappa_M$, $\kappa_\text{gm}$ into the product of a sparse lower-triangular and a sparse upper-triangular matrix, with row and column permutations, $\mathsf{P}_r\mathsf{K}\mathsf{P}_c = \mathsf{L}_K\mathsf{U}_K$ (sparse LU factorisation by SuperLU through SciPy; about 4~s), after which each velocity field costs 0.02~s (two triangular solves).
+
+\textbf{Validation against Veros.} Veros was run with temperature clamped until the circulation settled, and each term of its momentum tendency was captured.
+\begin{itemize}
+\item Term by term, the matrices reproduce Veros's friction and pressure-gradient tendencies to $10^{-13}$--$10^{-14}$ (relative) and its Coriolis term to $10^{-4}$ (the difference being the metric terms).
+\item The steady solve reproduces the settled $u$, $v$, $w$ to 0.2\%, 0.2\% and 0.5--0.9\%; with Veros's own advection and metric terms supplied as an extra forcing, to better than $2\times10^{-4}$.
+\item The \emph{change} of the settled circulation between the 4-year and the 200-year temperature is reproduced to 0.3\% when each state uses its own friction coefficients, and to about 9\% when the friction coefficients of the 4-year state are used for both. That 9\% is the price of lagging the closures.
+\end{itemize}
+
+\subsection{Linearisation}\label{sec:jacobian}
+
+The advective tendency is bilinear in velocity and temperature, $\mathsf{M}(\mathbf{u})\,T = \mathsf{N}_u(T)\,u + \mathsf{N}_v(T)\,v + \mathsf{N}_w(T)\,w$, where the matrices $\mathsf{N}$ hold the same stencil coefficients as $\mathsf{M}$, arranged by the velocity they multiply. Linearising~\eqref{eq:g} and~\eqref{eq:K} together about a temperature $T$ gives, for the unknowns $(\delta T, \delta u, \delta v, \delta p_s)$,
+\begin{equation}
+\mathsf{J} =
+\begin{pmatrix}
+\mathsf{M}(\mathbf{u}) + \mathsf{L}(T) & \mathsf{N}(T) \\
+\mathsf{P}\,\dfrac{\partial\rho}{\partial T} & \mathsf{K}
+\end{pmatrix},
+\qquad
+\mathsf{L} = \mathsf{E} + \mathsf{D}_{33} + \mathsf{F} + \mathsf{D} + \mathsf{R},
+\qquad
+\mathsf{N} = \big( \mathsf{N}_u + \mathsf{N}_w\mathsf{W}_u,\;\; \mathsf{N}_v + \mathsf{N}_w\mathsf{W}_v,\;\; 0 \big).
+\label{eq:J}
+\end{equation}
+The first row is the temperature tendency, linearised in $T$ at fixed velocity and in the velocity at fixed $T$; the second is the momentum balance linearised in the density.
+The block $\mathsf{P}\,\partial\rho/\partial T$ is how a temperature change reaches the circulation: $\partial\rho/\partial T$ is the diagonal matrix of the derivative of the in-situ density with respect to temperature in each cell, at that cell's salinity and pressure, so $(\partial\rho/\partial T)\,\delta T$ is the density change, and $\mathsf{P}$ turns it into the change of the hydrostatic pressure-gradient force, $-\nabla\delta p_\text{hydro}$. It is the only coupling from temperature to momentum, because temperature enters~\eqref{eq:K} only through $\mathsf{P}\rho(T)$. Its rows that belong to the rigid-lid equations (the third block row of $\mathsf{K}$, which determine $p_s$) are zero. What is \emph{not} differentiated is the dependence of the slopes, the ice mask and the mixing coefficients on $T$; they are re-evaluated at every step instead. $\mathsf{J}$ has 83{,}172 unknowns (28{,}497 ocean temperatures plus the momentum unknowns) and $3.1\times10^{6}$ non-zeros.
+
+\subsection{Pseudo-time stepping}\label{sec:pseudo}
+
+Newton's method on the coupled steady problem ($\mathbf{g}(T)=0$ together with the momentum balance~\eqref{eq:K}, for the unknowns $(T,\mathbf{x})$; its Jacobian is~\eqref{eq:J}) does not converge: the full Newton step from the 4-year state changes some cells by 7~$^\circ$C, far outside the range in which the linearisation holds, and a line search on $\lVert\mathbf{g}\rVert$ only accepts very short steps. The problem is marched in pseudo-time instead \citep{kelleykeyes1998}, with a linearly implicit (backward Euler) step of length $\Delta\tau$:
+\begin{equation}
+\begin{pmatrix}
+\mathsf{M} + \mathsf{L} - \mathsf{I}/\Delta\tau & \mathsf{N} \\
+\mathsf{P}\,\partial\rho/\partial T & \mathsf{K}
+\end{pmatrix}
+\begin{pmatrix} \delta T \\ \delta\mathbf{x} \end{pmatrix}
+=
+\begin{pmatrix} -\mathbf{g}(T) \\ 0 \end{pmatrix},
+\qquad T \leftarrow T + \delta T .
+\label{eq:step}
+\end{equation}
+Three features of~\eqref{eq:step} follow from treating the circulation as a diagnostic function of temperature, $\mathbf{x}(T)$:
+\begin{itemize}
+\item \emph{The right-hand side of the momentum rows is zero.} In this Newton-like form each right-hand side is minus the current residual of its equations. The circulation $\mathbf{x}$ at the start of every step is the exact solution of~\eqref{eq:K} for the current temperature (it is recomputed after every accepted step), so the momentum residual $\mathsf{K}\mathbf{x} + \mathbf{f}(T)$ is zero. The momentum rows then only require that it stays zero to first order, $\mathsf{K}\,\delta\mathbf{x} + \mathsf{P}\,(\partial\rho/\partial T)\,\delta T = 0$: $\delta\mathbf{x}$ is the linear response of the circulation to $\delta T$, not an update driven by forcing of its own.
+\item \emph{There is no wind stress in~\eqref{eq:step}.} The wind stress $\mathbf{f}_\tau$ does not depend on temperature, so it drops out of the linearisation. It is not neglected: it forces the circulation $\mathbf{x}(T)$ from which every step starts, and it enters the temperature residual $\mathbf{g}(T)$ on the right-hand side through the advecting velocity $\mathbf{u}(T)$.
+\item \emph{The pseudo-time term acts on temperature only.} $-\mathsf{I}/\Delta\tau$ is the backward-Euler form of $\partial T/\partial\tau$. The circulation has no time derivative in~\eqref{eq:K}: it is assumed to be in balance with the temperature at all times. Eliminating $\delta\mathbf{x}$ shows what the step is,
+\[
+\Big[\mathsf{M} + \mathsf{L} - \mathsf{N}\mathsf{K}^{-1}\mathsf{P}\,\frac{\partial\rho}{\partial T} - \frac{\mathsf{I}}{\Delta\tau}\Big]\,\delta T = -\mathbf{g}(T):
+\]
+a backward-Euler step of the temperature equation alone, in which the circulation responds to the temperature instantly. The step is damped on temperature because that is where the trouble lies: $\mathbf{x}$ is affine in the density for given friction coefficients, so its own equations need no damping and are solved exactly at no extra cost. Adding a pseudo-time term to the momentum rows would make each step move the circulation only part of the way to balance. The next step would then start from a momentum residual that is not zero, and the circulation would lag the temperature, slowing the solve without changing its fixed point. The third block row of~\eqref{eq:step} (one equation per water column, determining the elements of $p_s$) is the rigid-lid constraint of zero depth-integrated divergence, which has no time derivative to discretise. Physically the separation of time scales is large: with temperature clamped, the one-day score of $u$ fell below $10^{-5}$ after 672 days and that of $v$ after 1767 days (about five years; \texttt{equilibration\_experiments.tex}), while the deep temperature adjusts over centuries.
+\end{itemize}
+For short $\Delta\tau$ the step follows the physical evolution of temperature with the circulation always in balance; as $\Delta\tau\to\infty$ it becomes Newton's method. It is the ``longer, implicit time step for temperature'' idea, applied to the coupled system. The step is controlled as follows:
+\begin{itemize}
+\item $\Delta\tau$ starts at 0.125 years (45 days) in the first round and doubles after every accepted step.
+\item A step is rejected, and retried with half the $\Delta\tau$, if it changes any cell by more than 3~$^\circ$C, or by more than 20~$^\circ$C in a column where the convective switch (Section~\ref{sec:convection}) is on.
+\item A round ends when the accumulated pseudo-time reaches a target (30 or 60 years in the early rounds, 2000 years in the long last rounds). Fixing the pseudo-time, rather than the number of steps, is what makes the outcome insensitive to occasional rejections.
+\end{itemize}
+The pseudo-time a round covers matters as much as the number of rounds: the deep ocean adjusts with e-folding times of 450--950 years (Section~\ref{sec:2000}), and a round of 60 pseudo-years leaves it where a 200-year conventional run leaves it (Section~\ref{sec:long}).
+After every accepted step the velocities are recomputed from~\eqref{eq:K}, and the slopes, ice mask and mixing coefficients are rebuilt from the new temperature. Each linear system is solved with SciPy's sparse direct solver.
+
+\subsection{Convection}\label{sec:convection}
+
+With $\kappa_H$ fixed, the linearised system has a growing mode: a column that becomes statically unstable cannot mix, and the resolved overturning amplifies the anomaly. In the first trial this appeared at a 32-year step as an 85~$^\circ$C change in a Weddell Sea column (318$^\circ$E, 62$^\circ$S) that convects to 2000~m in the 200-year state but not at year 4. A convective switch stands in for the TKE scheme's response: before every step, $\kappa_H$ is raised to at least 10~m$^2$\,s$^{-1}$ on every interface where $N^2(T)<0$, and an interface that has been switched on stays on until $N^2>10^{-8}$~s$^{-2}$. The number of interfaces switched on roughly doubles over a solve (e.g.\ from 1600 to 3700 in the first round from day 60), which is the convective pattern moving towards that of the equilibrium. With the switch, and with turbulence energies held (Section~\ref{sec:closures}), steps of up to 1024 pseudo-years are accepted without rejection once two rounds have been done (Section~\ref{sec:long}).
+
+\subsection{What is held fixed: turbulence energies, not mixing coefficients}\label{sec:closures}
+
+The two turbulence closures have their own prognostic energies, $e$ and $E$, which cannot be obtained from a steady linear solve (Section~\ref{sec:why}); they are taken from the current model state and held fixed during a solve. There is a choice in what exactly is held:
+\begin{description}
+\item[Coefficients held.] $\kappa_H$, $\kappa_M$, $K_\text{gm}$ and $\kappa_\text{gm}$ are computed once, from the model state, and kept.
+\item[Energies held.] $e$ and $E$ are kept, and the four coefficients are recomputed from them and from $N^2(T)$ before every step, with the same formulas Veros uses (mixing length $\propto\sqrt{e}/N$, and so on; discretisation document). The momentum operator $\mathsf{K}$ is refactorised each step because $\kappa_M$ and $\kappa_\text{gm}$ change.
+\end{description}
+The second is what Veros itself does on the first step after the temperature is replaced, so the result of the solve is then consistent with the model's own diagnosis of its mixing. It shortens the adjustment after the solve considerably (Section~\ref{sec:expinit}) and is the choice used in the final method. The energies themselves still change once Veros runs again, which is the reason for more than one round (Section~\ref{sec:rounds}).
+
+\subsection{Putting the solution into the model}\label{sec:patch}
+
+Replacing the temperature alone leaves the model state inconsistent, and the earlier experiments showed that the resulting shock is long-lived. The whole state is therefore made consistent, in memory, before the next Veros step:
+\begin{itemize}
+\item \emph{Temperature:} the solution, at all three stored time levels.
+\item \emph{Density, $N^2$, dynamic enthalpy:} recomputed from the new temperature by Veros's own routine.
+\item \emph{Velocities $u$, $v$, $w$:} from~\eqref{eq:K} for the new temperature, at all three time levels.
+\item \emph{Streamfunction:} Veros adds the depth-mean flow from $\psi$ at every step, so $\psi$ must match the new velocities or the old barotropic flow returns after one step. $\psi$ is recovered from the depth-integrated transports by least squares on the relations Veros uses ($\psi$ differences across each cell face equal the transport through it). Because the solution of~\eqref{eq:K} is non-divergent this is exact: the residual is $2\times10^{-13}$, and applied to a Veros state it returns Veros's own $\psi$ to the same accuracy at every point next to ocean. $\partial\psi/\partial t$ is set to zero.
+\item \emph{Adams--Bashforth tendencies:} the ``previous step'' tendencies of temperature, dynamic enthalpy, $u$ and $v$ are set equal to the tendencies of the patched state itself (evaluated with Veros's kernels), so that the first step is not driven by tendencies left over from the old state.
+\item \emph{Left as they are:} TKE and EKE.
+\end{itemize}
+Giving the model consistent velocities, rather than the temperature alone, brought the criterion forward by about 300 days in the 4-year experiment (Table~\ref{tab:exp4veros}).
+
+\subsection{Checks}\label{sec:checks}
+
+\begin{itemize}
+\item Every block of~\eqref{eq:K} is validated against Veros as described in Section~\ref{sec:momentum_op}. Each matrix of~\eqref{eq:g} reproduces the Veros routine for its term to rounding error, for the 200-year state and for the initial state, and one temperature step assembled from them agrees with a complete Veros step to $2\times10^{-6}$ of the change of temperature in that step (earlier experiments, Section ``Validation of the matrices against Veros'').
+\item The mixing coefficients computed with the formulas of the discretisation document from the $e$, $E$, $N^2$ and $\varepsilon_v$ of a model state equal Veros's own arrays: $\kappa_M$ exactly, and $\kappa_H$, $K_\text{gm}$ and $\kappa_\text{gm}$ to rounding error.
+\item $\mathsf{N}_u u+\mathsf{N}_v v+\mathsf{N}_w w$ equals $\mathsf{M}(\mathbf{u})T$ to $3\times10^{-15}$; the velocity part of~\eqref{eq:J} agrees with a finite difference of $\mathbf{u}(T)$ to $2\times10^{-6}$.
+\item With energies held, the recomputed coefficients equal the model's own at the starting temperature ($\kappa_H$ to $5\times10^{-7}$, $\mathsf{K}$ to rounding).
+\item The script that steps Veros day by day and computes the score and the distance (\texttt{spinup\_from\_init.py}), run without any solve, reproduces the baseline's daily scores to all printed digits and its crossing on day 3714.
+\end{itemize}
+
+%======================================================================
+\section{Experiment A: one solve from the 4-year state}\label{sec:exp4yr}
+%======================================================================
+
+This is the first test of the method, from the same 4-year state (day 1440) as the frozen-velocity solve of Section~\ref{sec:why}. It used one round, with mixing coefficients held (Section~\ref{sec:closures}), $\Delta\tau$ doubling from 1 year, and the 3~$^\circ$C limit applied to every cell.
+
+\textbf{The solve.} Table~\ref{tab:exp4solve} follows the distance from both references through the solve.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r|r|rrrr|rrrr}
+\toprule
+accepted & pseudo-time & \multicolumn{4}{c|}{RMS$(T-T_{200})$ [$^\circ$C]} & \multicolumn{4}{c}{RMS$(T-T_{2000})$ [$^\circ$C]} \\
+\cmidrule{3-6}\cmidrule{7-10}
+steps & [years] & all & surface & 935 m & bottom & all & surface & 935 m & bottom \\
+\midrule
+0 & 0 & 0.83 & 0.52 & 1.01 & 0.34 & 0.85 & 0.52 & 1.00 & 0.69 \\
+1 & 1 & 0.78 & 0.49 & 0.94 & 0.34 & 0.80 & 0.49 & 0.93 & 0.69 \\
+3 & 7 & 0.60 & 0.39 & 0.68 & 0.31 & 0.64 & 0.40 & 0.68 & 0.69 \\
+5 & 31 & 0.40 & 0.25 & 0.38 & 0.23 & 0.47 & 0.27 & 0.38 & 0.67 \\
+6 & 63 & 0.30 & 0.18 & 0.25 & 0.17 & 0.40 & 0.21 & 0.28 & 0.63 \\
+9 & 143 & 0.17 & 0.11 & 0.14 & 0.09 & 0.29 & 0.15 & 0.18 & 0.52 \\
+10 & 207 & 0.20 & 0.16 & 0.16 & 0.18 & 0.29 & 0.20 & 0.20 & 0.44 \\
+11 & 335 & 0.20 & 0.16 & 0.15 & 0.41 & 0.26 & 0.19 & 0.17 & 0.42 \\
+15 & 341 & 0.19 & 0.14 & 0.14 & 0.29 & 0.25 & 0.18 & 0.16 & 0.35 \\
+\midrule
+\multicolumn{2}{l|}{frozen-velocity solve~\eqref{eq:frozen}} & 3.37 & 0.68 & 2.53 & 5.39 & & & & \\
+\bottomrule
+\end{tabular}
+\caption{The coupled solve from the 4-year state. Fifteen steps were accepted and fifteen rejected, in 502~s.}
+\label{tab:exp4solve}
+\end{table}
+
+\begin{itemize}
+\item For the first 30 pseudo-years the solve tracks what Veros itself would do: Veros is also about 0.40~$^\circ$C from $T_{200}$ at year 35.
+\item Measured from $T_{200}$, the solve levels off near 0.2~$^\circ$C after about 140 pseudo-years, and at steps of 64 years and more the bottom level moves away from $T_{200}$ (0.09 to 0.41~$^\circ$C). When this was first seen, it was taken as a sign that the frozen closures were wrong at depth.
+\item Measured from $T_{2000}$ the picture is different: the distance keeps falling throughout the solve (0.29 to 0.25~$^\circ$C after step 9), and the bottom level moves steadily \emph{towards} the equilibrium, from 0.69 to 0.35~$^\circ$C. The long steps were anticipating the deep warming that the 200-year run had not yet made (Section~\ref{sec:2000}). What remains, about 0.16--0.18~$^\circ$C above 1000~m, is the error of holding the 4-year closures, which the rounds of Experiment~B remove.
+\end{itemize}
+
+\textbf{Back in Veros.} The states after 5, 9 and 15 accepted steps were put into the model (Section~\ref{sec:patch}) and Veros was run for 20 years from each (Table~\ref{tab:exp4veros}, Figure~\ref{fig:exp4}).
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|r|r|rr|r}
+\toprule
+State given to Veros & score $<10^{-5}$ & days above & \multicolumn{2}{c|}{RMS$(T-T_{200})$ [$^\circ$C]} & RMS$(T-T_{2000})$ \\
+\cmidrule{4-5}
+at day 1440 & on day & afterwards & at that day & after 20 yr & after 20 yr [$^\circ$C] \\
+\midrule
+Unchanged (baseline) & 3714 & 17 & 0.61 & 0.47 & 0.52 \\
+Coupled solve, 5 steps (31 pseudo-years) & 1643 & 9 & 0.39 & 0.29 & 0.40 \\
+Coupled solve, 9 steps (143 pseudo-years) & 1731 & 8 & 0.15 & 0.107 & 0.24 \\
+Coupled solve, 15 steps (341 pseudo-years) & 1753 & 11 & 0.18 & 0.111 & 0.16 \\
+9 steps, temperature only & 2027 & 8 & 0.14 & 0.109 & 0.25 \\
+\bottomrule
+\end{tabular}
+\caption{Veros restarted from the coupled solve at day 1440. ``Days above afterwards'' counts later days on which the score is again above $10^{-5}$; they come in short bursts, which the baseline has too. The last two columns are distances 20 years after the restart (day 8640). ``Temperature only'': the temperature of the same nine-step coupled solve~\eqref{eq:step} was put into the model, with density, $N^2$ and the temperature tendency recomputed from it, but the velocities, streamfunction and momentum tendencies were left as they were on day 1440. The state from 15 steps is then as close to $T_{2000}$ as conventional Veros after about 320 years (about 400 years at the bottom level).}
+\label{tab:exp4veros}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{veros_from_coupled.png}
+\caption{Experiment A. Top: temperature score of conventional Veros (grey, and continued in blue) and of Veros restarted at year 4 from the coupled solve. Bottom: distance from the 200-year state.}
+\label{fig:exp4}
+\end{figure}
+
+\begin{itemize}
+\item The criterion is met 200--300 days after the restart, on day 1643 at best, against 3714.
+\item More solver steps do not bring the criterion forward: the run from five steps crosses soonest. What the later steps buy is distance from the reference (0.39 against 0.15~$^\circ$C from $T_{200}$ at the crossing).
+\item After the restart the score falls to about $4\times10^{-6}$ and stays there, apart from bursts. The run from nine steps settles at 0.107~$^\circ$C from $T_{200}$ and stops approaching it. That plateau is the error of $T_{200}$, not of the method: from $T_{2000}$ the nine-step run is 0.24~$^\circ$C away, and the fifteen-step run, which looked no better against $T_{200}$, is the best of the four at 0.16~$^\circ$C.
+\item The 200--300 days are the time the turbulence energies and the circulation take to adjust to a temperature field they were not computed for.
+\end{itemize}
+
+%======================================================================
+\section{Experiment B: from the initial state}\label{sec:expinit}
+%======================================================================
+
+Experiment~B starts from \texttt{Init\_state.restart.h5}, so the warm-up counts towards the days needed. Days below are counted from that state.
+
+The initial state is not self-consistent. The density and stratification stored in it are not those of its temperature and uniform salinity; they are reproduced by the same temperature with a realistic, non-uniform salinity whose volume mean is the uniform value. The state therefore appears to come from a run with realistic salinity in which the salinity was afterwards replaced by its mean. From the second step on the model computes its density from temperature alone, so the velocities and turbulence of the initial state no longer match the density field, and many columns become statically unstable at once. This is a shock on day 0, and it is the reason for the warm-up used below. The figures behind this diagnosis are in the earlier experiments (\texttt{equilibration\_experiments.tex}, Section ``The competition's initial state'').
+
+\subsection{No warm-up}
+
+Applied directly to the initial state, the solver cannot make progress. Its first step changes cells by 12~$^\circ$C at $\Delta\tau=1$ year and still by 3.3~$^\circ$C as $\Delta\tau\to0$: because the initial state is not consistent with the model's temperature-only density (Section~\ref{sec:setting}), it contains statically unstable columns that need a convective adjustment of several degrees, which is instantaneous on the time scale of any step, and a circulation that does not belong to its density. (Conventional Veros shows the same adjustment as a peak in its score of $3.6\times10^{-3}$ on day 3.) Allowing the larger change in convecting columns (Section~\ref{sec:pseudo}) lets the first steps through, but later steps are rejected again and again, each rejection halving $\Delta\tau$, until only steps of a few days are accepted; after seven accepted steps only about one pseudo-year has passed. Veros restarted from there does not meet the criterion within 2500 days, and the state is hardly closer to the reference (1.04 against 1.29~$^\circ$C). The initial state's TKE is also immature, about a quarter of its 4-year norm. The remedy is the one suggested at the outset: let Veros run conventionally first.
+
+\subsection{Warm-up length and pseudo-time, one round}\label{sec:scan}
+
+Table~\ref{tab:scan} and Figure~\ref{fig:scan} show the day of crossing for one round, as a function of warm-up length and of the number of solver steps ($\Delta\tau$ doubling from 0.125 years, so $k$ steps cover $0.125\,(2^k-1)$ pseudo-years).
+Each setting was run with both treatments of the turbulence closures (Section~\ref{sec:closures}). In both, the slopes of the isoneutral and GM terms and the ice mask are recomputed from the temperature before every step, and the convective switch (Section~\ref{sec:convection}) raises $\kappa_H$ wherever the new temperature is statically unstable. They differ in what else is recomputed:
+\begin{description}
+\item[Coefficients held.] The four mixing coefficients are computed once, from the warm-up state at the start of the round, and kept for every step of the round: the vertical diffusivity $\kappa_H$ and viscosity $\kappa_M$ (from that state's TKE $e$, its stratification $N^2$ and its stored dissipation by vertical friction $\varepsilon_v$), the GM diffusivity $K_\text{gm}$ and the eddy viscosity $\kappa_\text{gm}$ (from its EKE $E$ and $N^2$). The momentum operator $\mathsf{K}$ is factorised once per round. As the temperature changes during the solve, the mixing does not respond to it (except through the convective switch).
+\item[Energies held.] $e$, $E$ and $\varepsilon_v$ are taken from the warm-up state and kept. Before every step $N^2$ is recomputed from the current temperature, and the four coefficients are recomputed from it with Veros's own formulas. A stronger stratification shortens the mixing length $\ell=\sqrt{2e}/N$ and so lowers $\kappa_M = 0.1\,\ell\sqrt{e}$; it raises the Richardson number $N^2\kappa_M/\varepsilon_v$ and so the Prandtl number, lowering $\kappa_H$ further. It also changes the Rossby radius and with it the eddy length scale and $K_\text{gm}$, and it lowers $\kappa_\text{gm} = K_\text{gm}\min(0.01, f^2/N^2)$. $\mathsf{K}$ is refactorised every step (about 4~s each).
+\end{description}
+Holding the energies is what Veros itself does on the steps after the solution is put into the model: it keeps $e$ and $E$ from before and diagnoses the coefficients from the new stratification. With coefficients held, the solution is in balance with mixing that Veros will not use, and Veros then has to bring the temperature into line with the coefficients it computes. Neither treatment changes $e$ or $E$ themselves; those adjust only when Veros runs again, which is why several rounds help (Section~\ref{sec:rounds}).
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r|rrrr|rrrr}
+\toprule
+ & \multicolumn{4}{c|}{coefficients held} & \multicolumn{4}{c}{energies held} \\
+\cmidrule{2-5}\cmidrule{6-9}
+warm-up & $k=7$ & 8 & 9 & 10 & $k=7$ & 8 & 9 & 10 \\
+{[days]} & (16 y) & (32 y) & (64 y) & (128 y) & (16 y) & (32 y) & (64 y) & (128 y) \\
+\midrule
+10 & 1136 & 700 & 1249 & 667 & & & & \\
+20 & 1093 & 679 & 1243 & 688 & & & & \\
+30 & 617 & 530 & 482 & 514 & 429 & 372 & 324 & 420 \\
+60 & 593 & 591 & 705 & 952 & 434 & 361 & 330 & 452 \\
+90 & 595 & 545 & 497 & 478 & 473 & 458 & 393 & 479 \\
+120 & 605 & 581 & 538 & 494 & & & & \\
+\bottomrule
+\end{tabular}
+\caption{One round from the initial state: model day on which the score first falls below $10^{-5}$ (conventional Veros: 3714). Pseudo-years in brackets are nominal; a rejected step reduces them.}
+\label{tab:scan}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{from_init_scan.png}
+\caption{The entries of Table~\ref{tab:scan}. The dotted line marks the warm-up itself (the crossing cannot precede the solve).}
+\label{fig:scan}
+\end{figure}
+
+\begin{itemize}
+\item \emph{Warm-up.} Thirty days are enough; 10--20 days are not reliably so, and a warm-up longer than 60 days only adds days. Longer warm-ups were also tried with fewer steps (180, 360, 720, 1080 days): none was better.
+\item \emph{Pseudo-time.} At least about 16 pseudo-years are needed. With 4 pseudo-years the crossing is no earlier than day 1877.
+\item \emph{Energies held.} Holding the turbulence energies instead of the mixing coefficients brings the crossing forward by 100--200 days in every case, to day 324--330 at best.
+\item \emph{Noise.} The crossing day is not a smooth function of the settings: it depends on whether a burst in the score happens to fall near the threshold, and on whether a solver step was rejected. Differences of a few tens of days between neighbouring entries are not significant.
+\item \emph{Step growth.} Growing $\Delta\tau$ by factors of 3 or 4 instead of 2 saves nothing: the larger steps exceed the 3~$^\circ$C limit and are rejected.
+\end{itemize}
+
+The single round with a 60-day warm-up and nine steps is 0.39~$^\circ$C from $T_{2000}$ after its solve (0.31 from $T_{200}$). After a single round the score decays slowly: about $5\times10^{-5}$ five days after the solve, $2\times10^{-5}$ after 100 days and $10^{-5}$ after 250--300 days. During that time the daily temperature change is concentrated in the second to fourth model levels (about 60--300~m) and spread over the whole ocean, not at a few convection sites (diagnosed for the run with a 90-day warm-up, ten steps and coefficients held): it is the upper thermocline adjusting to mixing coefficients that have changed since the solve.
+
+\subsection{Several rounds}\label{sec:rounds}
+
+Because the slow decay comes from the closures adjusting, the solve is repeated once they have had time to do so. Each later round starts from the current model state, takes its turbulence energies from it, starts at a longer $\Delta\tau$ (2 years, then 4 years) and covers 60 pseudo-years. Table~\ref{tab:rounds} gives the results.
+
+\begin{table}[h]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.6pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|l|l|r|r|l}
+\toprule
+Solves on days & pseudo-years & RMS$(T-T_{200})$ after & score $<10^{-5}$ & RMS$(T-T_{200})$ & RMS$(T-T_{2000})$ after \\
+ & reached in each & each solve [$^\circ$C] & on day & on that day [$^\circ$C] & each solve [$^\circ$C] \\
+\midrule
+60 & 64 & 0.31 & 330 & 0.29 & 0.39 \\
+\midrule
+20, 40 & 41, 63 & 0.37, 0.15 & 182 & 0.14 & 0.45, 0.27 \\
+60, 90 & 32, 62 & 0.43, 0.18 & 174 & 0.18 & \\
+\midrule
+60, 90, 120 & 32, 62, 60 & 0.43, 0.18, 0.08 & 138 & 0.08 & \\
+45, 75, 105 & 40, 62, 60 & 0.38, 0.15, 0.07 & 111 & 0.07 & \\
+30, 60, 90 & 40, 62, 60 & 0.38, 0.16, 0.07 & 97 & 0.07 & \\
+30, 50, 70 & 40, 62, 60 & 0.38, 0.16, 0.07 & 80 & 0.07 & \\
+30, 40, 50 & 40, 86, 60 & 0.38, 0.14, 0.09 & 78 & 0.09 & \\
+\textbf{20, 40, 60} & 41, 63, 60 & 0.37, 0.15, 0.07 & \textbf{68} & 0.07 & 0.45, 0.27, 0.22 \\
+15, 30, 45 & 33, 64, 60 & 0.43, 0.17, 0.08 & 87 & 0.08 & \\
+20, 30, 40 & 41, 64, 84 & 0.37, 0.15, 0.10 & 69 & 0.10 & \\
+10, 20, 30 & 40, 62, 60 & 0.41, 0.18, 0.09 & 67 & 0.09 & 0.47, 0.29, 0.22 \\
+\midrule
+20, 40, 60, 80 & 41, 63, 60, 60 & 0.37, 0.15, 0.07, 0.05 & 68$^{*}$ & 0.07 & 0.45, 0.27, 0.22, 0.18 \\
+30, 50, 70, 90 & 72, 62, 80, 72 & 0.31, 0.16, 0.16, 0.20 & 115 & 0.20 & 0.40, 0.27, 0.25, 0.21 \\
+\midrule
+20, 40, 60 (coefficients held) & 32, 64, 60 & 0.47, 0.21, 0.11 & 119 & 0.10 & 0.53, 0.32, 0.23 \\
+\midrule
+20, 40, 60 (L1) & 41, 63, 2044 & 0.37, 0.15, 0.22 & 83 & 0.22 & 0.45, 0.27, 0.06 \\
+\textbf{20, 40, 60, 80} (L2) & 41, 63, 60, 2016 & 0.37, 0.15, 0.07, 0.20 & 68$^{*}$ & 0.07 & 0.45, 0.27, 0.22, \textbf{0.05} \\
+\textbf{10, 20, 30, 40} (L3) & 40, 62, 60, 2016 & 0.41, 0.18, 0.09, 0.20 & \textbf{63} & 0.20 & 0.47, 0.29, 0.22, 0.06 \\
+10, 20, 30, 50 (L4) & 40, 62, 60, 2016 & 0.41, 0.18, 0.09, 0.20 & 66 & 0.20 & 0.47, 0.29, 0.22, 0.06 \\
+10, 20, 30, 40, 50 (L5) & 40, 62, 60, 60, 2016 & 0.41, 0.18, 0.09, 0.06, 0.20 & 66 & 0.20 & 0.47, 0.29, 0.22, 0.19, 0.06 \\
+\bottomrule
+\end{tabular}
+\caption{Several rounds from the initial state, turbulence energies held except where stated. The first round starts at $\Delta\tau=0.125$ years and the later ones at 2 and 4 years (32 years for the long rounds of L2--L5). The target was 30 pseudo-years in the first round and 60 in the later ones (60 in every round of the second four-round row, 2000 in the long rounds); the pseudo-time reached differs because $\Delta\tau$ doubles and steps are sometimes rejected. The last column is filled for the configurations that were rerun, with identical results, or first run, after $T_{2000}$ became available. $^{*}$These two runs are identical to the three-round run in bold until their fourth solve on day 80, so they meet the criterion on day 68, before that solve. After the fourth solve the score rises above $10^{-5}$ again and falls back below it on day 85 (fourth round of 60 pseudo-years) and day 93 (L2). The three-round configuration in bold is that of Section~\ref{sec:final}, L1 is described in Section~\ref{sec:long}, and the four-round ones in bold are the most accurate configuration (L2) of Section~\ref{sec:long} and the fastest (L3) of Section~\ref{sec:fast}.}
+\label{tab:rounds}
+\end{table}
+
+\begin{itemize}
+\item \emph{Against $T_{200}$, each round roughly halved the distance}: about 0.4, 0.15 and 0.07~$^\circ$C after one, two and three rounds, almost independently of when the rounds were done, while one long solve did not achieve this (64 pseudo-years in a single round left 0.31~$^\circ$C). This is what the configurations were tuned on.
+\item \emph{Against $T_{2000}$ the gain per round shrinks}: 0.45, 0.27, 0.22 and (with a fourth round of 60 pseudo-years) 0.18~$^\circ$C. The upper ocean converges, but the bottom level is still 0.51~$^\circ$C from equilibrium after three rounds and 0.45 after four, because each round covers only decades of pseudo-time (Section~\ref{sec:long}).
+\item \emph{After the third round the criterion is met within 6 to 42 days.} The day of crossing is then set mainly by the day of the last solve, so shorter gaps give earlier crossings, down to day 67--69; with a long fourth round, down to day 63 (Section~\ref{sec:fast}).
+\item \emph{Gaps shorter than about 20 days begin to cost accuracy.} With 10-day gaps the final distance from $T_{200}$ is 0.09--0.10~$^\circ$C instead of 0.07, and in the run with solves on days 20, 30 and 40 the solves needed 35 accepted steps instead of about 20 and the score returned above the threshold on 8 later days. Against $T_{2000}$ the cost of 10-day gaps is much smaller: three rounds on days 10, 20 and 30 end 0.224~$^\circ$C away against 0.217, the difference being mostly at 935~m (0.142 against 0.130~$^\circ$C).
+\item \emph{The rounds converge towards equilibrium, not towards $T_{200}$.} The four-round configuration with 60 or more pseudo-years in every round seemed, against $T_{200}$, to stop improving after the second round and then to diverge (0.16, 0.16, 0.20~$^\circ$C). Against $T_{2000}$ it improves in every round (0.40, 0.27, 0.25, 0.21~$^\circ$C, and at the bottom level 0.61, 0.52, 0.45, 0.39): its longer rounds were taking it past $T_{200}$ towards the equilibrium. The earlier conclusion that the rounds are not guaranteed to converge was an artefact of the reference.
+\item \emph{Holding energies rather than coefficients} matters for the crossing (day 68 against day 119) and for the upper ocean (0.13 against 0.15~$^\circ$C at 935~m), but less for the overall distance from $T_{2000}$ (0.22 against 0.23~$^\circ$C) than it seemed against $T_{200}$ (0.07 against 0.11).
+\item \emph{Specify pseudo-time, not steps.} In an earlier version of these runs each round was given a number of steps. When a step happened to be rejected the round ended short of its pseudo-time, and the results scattered widely (crossings between day 163 and day 1122 for two rounds). With a pseudo-time target every three-round run above lies between day 67 and day 138.
+\end{itemize}
+
+\subsection{Three rounds with 20-day gaps}\label{sec:final}
+
+The three-round configuration is: Veros for 20 days; a solve to 30 pseudo-years starting at $\Delta\tau=0.125$ years; Veros for 20 days; a solve to 60 pseudo-years starting at 2 years; Veros for 20 days; a solve to 60 pseudo-years starting at 4 years; then Veros. Turbulence energies are held in each solve. It was chosen, by its distance from $T_{200}$, as the earliest crossing among the configurations that kept the full accuracy of three rounds. Against $T_{2000}$ that choice is hard to justify: the configuration with solves on days 10, 20 and 30 crosses a day earlier, needs fewer steps (19 accepted and 2 rejected), and is only 0.007~$^\circ$C further from $T_{2000}$. The three solves took 24 accepted and 7 rejected steps in total. Measured from $T_{2000}$, however, it is only as close to equilibrium as conventional Veros after 200 years; the most accurate configuration (Section~\ref{sec:long}) adds a fourth, long round to it.
+
+Figure~\ref{fig:final} shows this run, continued to day 4060, with the single-round run and the baseline.
+\begin{itemize}
+\item The score first falls below $10^{-5}$ on day 68, eight days after the last solve (baseline: day 3714). It returns above the threshold on one later day, in a burst near day 100, and then declines steadily: $7.5\times10^{-6}$ on day 100, $3.6\times10^{-6}$ on day 360 and $1.6\times10^{-6}$ on day 4000. The baseline reaches $4.4\times10^{-6}$ on day 7200.
+\item The distance from $T_{200}$ is 0.070~$^\circ$C on day 68 (0.05 at the surface, 0.06 at the bottom level) and decreases slowly afterwards, to 0.057~$^\circ$C on day 4000. The baseline is 0.58~$^\circ$C from $T_{200}$ on day 4060 and 0.48 on day 7200; the single-round run is 0.24~$^\circ$C away on day 4000.
+\item From $T_{2000}$ the same state is 0.217~$^\circ$C away on day 68 (0.51 at the bottom level) and 0.208 twenty years later. What looked, against $T_{200}$, like a small residual error being slowly removed is a state next to $T_{200}$ moving towards it, while the deep ocean remains as far from equilibrium as in $T_{200}$ (Section~\ref{sec:long}).
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{from_init_timeseries.png}
+\caption{Experiment B. Top: temperature score against model day (logarithmic axis) for conventional Veros, for one round at day 60 and for three rounds at days 20, 40 and 60. Bottom: distance from the 200-year state.}
+\label{fig:final}
+\end{figure}
+
+\subsection{A long last round: the most accurate configuration}\label{sec:long}
+
+Measured from $T_{2000}$, the three-round configuration of Section~\ref{sec:final} is 0.22~$^\circ$C from equilibrium on day 68, about as close as conventional Veros after 190--200 years, with the bottom level 0.51~$^\circ$C away. In the 20 years of Veros that follow, its distance from $T_{200}$ falls from 0.070 to 0.052~$^\circ$C while its distance from $T_{2000}$ stays at 0.21: the rounds had converged to a state next to $T_{200}$, not to equilibrium. Each round covers only 30--60 pseudo-years (164 in all), against deep e-folding times of 450--950 years; the pseudo-time stepping is a damped march, so it approximates two centuries of integration and no more. Experiment~A, whose single solve reached 341 pseudo-years, had brought the bottom level much closer (0.35~$^\circ$C).
+
+The remedy is a last round that is long compared with the slowest time scale. Two variants were run, with $\Delta\tau$ doubling to 1024 years and a target of 2000 pseudo-years:
+\begin{description}
+\item[L1:] the three-round configuration with its third round extended to 2000 pseudo-years (solves on days 20, 40, 60);
+\item[L2:] the three-round configuration unchanged, followed after 20 more days by a fourth round of 2000 pseudo-years starting at $\Delta\tau=32$ years (solves on days 20, 40, 60, 80).
+\end{description}
+No step of either long round was rejected; the largest change in a step was 1.6~$^\circ$C. Table~\ref{tab:long} gives the results.
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|r|rrrr|r}
+\toprule
+ & & \multicolumn{4}{c|}{RMS$(T-T_{2000})$ [$^\circ$C]} & \\
+ & score $<10^{-5}$ & \multicolumn{4}{c|}{after the last solve} & conventional \\
+\cmidrule{3-6}
+Configuration & on day & all & surface & 1000~m & bottom & year as close \\
+\midrule
+Three rounds (Section~\ref{sec:final}) & 68 & 0.217 & 0.113 & 0.130 & 0.511 & 190 \\
+L1: third round 2044 pseudo-years & 83 & 0.059 & 0.050 & 0.048 & 0.085 & 880 \\
+\textbf{L2: fourth round 2016 pseudo-years} & 68 (93) & \textbf{0.049} & 0.033 & 0.034 & 0.031 & \textbf{980} \\
+\quad L2, then 10 years of Veros & & 0.037 & 0.031 & 0.025 & 0.028 & 1110 \\
+\midrule
+Conventional Veros, year 200 ($T_{200}$) & -- & 0.209 & 0.094 & 0.107 & 0.509 & 200 \\
+\bottomrule
+\end{tabular}
+\caption{The long last round. ``Score $<10^{-5}$ on day'': the first day on which the criterion is met. L2 meets it on day 68, before its fourth solve, in the state of the three-round run; the figure in brackets is the first day below $10^{-5}$ after the fourth solve. ``Conventional year as close'': the first decadal snapshot of the 2000-year run that is at least as close to $T_{2000}$ over the whole ocean; for the bottom level alone it is 200, 1010 and 1430 years for the three configurations, and 1460 years for L2 followed by 10 years of Veros. The 1000~m column is the level centred at 935~m.}
+\label{tab:long}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{l2_patterns.png}
+\caption{Temperature minus $T_{2000}$ for the most accurate configuration (L2) at 25~m, 935~m, 3010~m and the bottom level (4855~m), immediately after the last solve on day 80 (top) and after 10 more years of Veros (bottom). Land is white; each column has its own colour scale. The RMS and the mean in each title are unweighted, over the ocean cells of the level.}
+\label{fig:l2patterns}
+\end{figure}
+
+\begin{itemize}
+\item \emph{The long round reaches the deep ocean.} L2 is 0.049~$^\circ$C from $T_{2000}$ on day 80: as close as conventional Veros after about 1000 years overall and about 1400 years at the bottom level. Its score first falls below $10^{-5}$ on day 68, before the fourth solve, exactly as in the three-round run. The fourth solve then disturbs the circulation: the score rises to $2.5\times10^{-5}$ and falls below $10^{-5}$ again on day 93, 13 days after the solve (8 days after the third solve).
+\item \emph{It works better after the rounds than in place of one.} L1, which replaces the third round instead of adding a fourth, is 0.059~$^\circ$C away and 0.085~$^\circ$C at the bottom: a long round is more accurate when the turbulence energies it holds have already adjusted to a nearly equilibrated upper ocean.
+\item \emph{What remains: small-scale pattern near the surface, a uniform cold bias at depth} (Figure~\ref{fig:l2patterns}). Over the whole ocean, 0.046 of the 0.049~$^\circ$C left by L2 remains after the mean of each level is removed, but that figure is dominated by the upper levels, which have the most ocean cells. At 25~m the error is frontal and small-scale, $\pm$0.05--0.1~$^\circ$C in the Southern Ocean between 40 and 60$^\circ$S and along the separated western boundary currents near 40$^\circ$N, with a level mean of only $-0.001~^\circ$C (RMS 0.033); part of it may be decadal variability of $T_{2000}$ itself. At 935~m it is a large-scale cold anomaly in the southern Indian and Pacific sectors, down to about $-0.06~^\circ$C (RMS 0.034, level mean $-0.014$). At 3010~m and at the bottom level it is nearly uniform: whole basins about 0.02~$^\circ$C too cold (at 3010~m RMS 0.023, level mean $-0.020$; at the bottom RMS 0.031, level mean $-0.017$). Below 1500~m the level means are 0.01--0.02~$^\circ$C colder than $T_{2000}$, while $T_{2000}$ is expected to warm by a further 0.01--0.03~$^\circ$C there. Against the true equilibrium L2's deep levels are therefore probably 0.02--0.05~$^\circ$C too cold, which is at the limit of what $T_{2000}$ can resolve.
+\item \emph{Veros removes part of the pattern error quickly.} Ten years of conventional Veros after L2 reduce the distance from 0.049 to 0.037~$^\circ$C (as close as year 1110), mostly by removing the mid-depth anomaly (RMS at 935~m from 0.034 to 0.025~$^\circ$C); the surface pattern (0.033 to 0.031) and the deep cold bias hardly change.
+\end{itemize}
+
+\subsection{Shorter gaps: the fastest configuration}\label{sec:fast}
+
+In the three-round runs the day of crossing is set by the day of the last solve (Section~\ref{sec:rounds}), and against $T_{2000}$ 10-day gaps cost little accuracy (0.224 against 0.217~$^\circ$C). Three configurations with 10-day gaps and a long last round were therefore run, each continued for ten years of Veros after its last solve:
+\begin{description}
+\item[L3:] solves on days 10, 20 and 30, and the long round on day 40;
+\item[L4:] solves on days 10, 20 and 30, and the long round on day 50;
+\item[L5:] solves on days 10, 20, 30 and 40 (the fourth to 60 pseudo-years from $\Delta\tau=4$ years), and the long round on day 50.
+\end{description}
+The short rounds are those of the three-round configuration, with the gaps halved. Each long round starts at $\Delta\tau=32$ years and reaches 2016 pseudo-years in six steps, none rejected. Table~\ref{tab:fast} compares them with L2.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|l|r|r|rrrr|r|r}
+\toprule
+ & & & & \multicolumn{5}{c|}{RMS$(T-T_{2000})$ [$^\circ$C]} & \\
+\cmidrule{5-9}
+ & & score $<10^{-5}$ & wall & \multicolumn{4}{c|}{after the last solve} & after & conventional \\
+\cmidrule{5-8}
+Run & solves on days & on day & time [s] & all & surface & 1000~m & bottom & 10 years & year as close \\
+\midrule
+\textbf{L3} & 10, 20, 30, 40 & \textbf{63} & \textbf{580} & 0.061 & 0.038 & 0.045 & 0.039 & 0.046 & 860 / 1000 \\
+L4 & 10, 20, 30, 50 & 66 & 582 & 0.057 & 0.037 & 0.041 & 0.037 & 0.043 & 900 / 1040 \\
+L5 & 10, 20, 30, 40, 50 & 66 & 672 & 0.055 & 0.035 & 0.040 & 0.037 & 0.043 & 920 / 1040 \\
+\textbf{L2} & 20, 40, 60, 80 & 68 (93) & 630 (767) & \textbf{0.049} & 0.033 & 0.034 & 0.031 & \textbf{0.037} & 980 / 1110 \\
+\bottomrule
+\end{tabular}
+\caption{Configurations with a long last round. Wall time: the solves and the Veros days up to the crossing; for L2, to day 68 (three rounds done) and, in brackets, to day 93. ``After 10 years'': RMS$(T-T_{2000})$ ten years of Veros after the last solve. ``Conventional year as close'': the first decadal snapshot of the 2000-year run that is at least as close to $T_{2000}$ over the whole ocean, after the last solve and after the ten years of Veros; for the bottom level alone it is 1340, 1350, 1350 and 1430 years after the last solve.}
+\label{tab:fast}
+\end{table}
+
+\begin{itemize}
+\item \emph{The criterion is met after the long solve.} Unlike L2, none of these runs falls below $10^{-5}$ before its last solve. L3 crosses on day 63, 23 days after its long solve; L4 and L5 cross 16 days after theirs. The long solve, not the short rounds, now sets the day of crossing.
+\item \emph{The score stays below the threshold.} In all three runs the highest score after the crossing is on the following day (9.7--9.8$\times10^{-6}$). It then declines steadily, to $3.8\times10^{-6}$ a year later and 1.9--2.8$\times10^{-6}$ after ten years, with no day above $10^{-5}$.
+\item \emph{L3 is the fastest configuration for the criterion}: the earliest crossing (day 63), and the joint lowest wall time (580~s). It is also close to equilibrium: as close to $T_{2000}$ as about 870 years of conventional Veros at the crossing, and 1000 years after ten more years of Veros.
+\item \emph{Shorter gaps cost accuracy in the long round.} Ordered by the time Veros has run before the long round, the distance after it is 0.061 (40 days), 0.057 (50 days), 0.055 (50 days with an extra round) and 0.049~$^\circ$C (80 days, L2). The differences are mostly at 935~m (0.045 to 0.034) and at the bottom (0.039 to 0.031); at the surface every configuration is 0.033--0.038~$^\circ$C away. The extra round of L5 is worth less than the longer gaps of L2. Ten years of Veros keep the ranking (0.046, 0.043, 0.043 and 0.037~$^\circ$C).
+\item \emph{Two aims, two configurations.} For the criterion, the long round should come as early as the short rounds allow. For equilibrium, the turbulence and circulation should be given time to adjust before the long round, and Veros run for some years after it. The differences between these runs (0.005--0.012~$^\circ$C) are comparable with the uncertainty of $T_{2000}$, so a finer optimisation for equilibrium cannot be judged against this reference.
+\end{itemize}
+
+\subsection{Wall time}\label{sec:wall}
+
+Timings are on a MacBook Pro M3 Pro. For the score criterion, model days are the measure in which the method wins; in wall time, at this resolution, it does not. For distance from equilibrium it wins in both.
+\begin{itemize}
+\item \emph{Veros} (JAX backend) takes 0.031--0.04~s per model day, so the baseline's 3714 days take about 2.5 minutes, and the 2000-year reference took 6.2 hours.
+\item \emph{One step of the coupled solve} takes 15--25~s. Almost all of it is the sparse direct factorisation of~\eqref{eq:step}; building every matrix takes under half a second, and refactorising the momentum operator about 4~s. One step therefore costs as much as roughly 500 model days.
+\item \emph{The three-round configuration} needs 31 linear solves (24 accepted, 7 rejected): 622--633~s for the solves and a few seconds for its 68 Veros days, about 10.5 minutes in all, four times the baseline's time to the criterion.
+\item \emph{The fastest configuration (L3)} needs 27 linear solves (25 accepted, 2 rejected): 569~s for the solves and 11~s for its 63 Veros days, about 9.7 minutes, again about four times the baseline's time to the criterion. Its state at the crossing is as close to $T_{2000}$ as about 870 years of conventional Veros, which take about 2.7 hours: about 17 times faster by that measure.
+\item \emph{The most accurate configuration (L2)} needs 37 linear solves (30 accepted, 7 rejected): 764~s for the solves and a few seconds for its 93 Veros days, about 13 minutes. (It meets the criterion on day 68, after the 31 solves of the three-round configuration; day 93 is when the final state also meets it.) Conventional Veros needs about 1000 years, roughly 3 hours, to come as close to $T_{2000}$: the method is about 14 times faster by that measure. The long round itself costs only six steps (about 2 minutes), because its pseudo-time grows geometrically.
+\item \emph{The cheapest variant tried for the criterion}, Experiment~A with five steps, took 93~s for the solve and about 63~s for its 1643 Veros days, the same wall time as the baseline.
+\end{itemize}
+Three attempts to reduce the cost of the linear algebra did not succeed: growing $\Delta\tau$ faster (the steps are rejected); eliminating the velocity unknowns and solving the remaining temperature system by GMRES, preconditioned with the temperature block (62 iterations and 2~s at $\Delta\tau=0.125$ years, but 466 iterations at 2 years and no convergence at 32 years); and reusing one factorisation as a preconditioner for later steps (no convergence within 120 iterations). One change that does help was written later for the 2$^\circ$ version of these scripts: the matrix is factorised in single precision and that factorisation is used as the preconditioner of Bi-CGSTAB on the double-precision system, which recovers the double-precision solution in one or two iterations. At 2$^\circ$ it factorises 2.6 times faster than the double-precision LU, with about two thirds of the memory; it was not used for the 4$^\circ$ runs reported here. The linear solver remains the open problem for wall time, here and still more at higher resolution (Section~\ref{sec:choices}).
+
+%======================================================================
+\section{Limits of what has been shown}\label{sec:limits}
+%======================================================================
+
+\begin{itemize}
+\item \emph{The criterion rewards a small tendency, not equilibrium.} A state can meet it while far from equilibrium (the baseline does, 0.65~$^\circ$C from $T_{2000}$; the 2000-year run is below it on every day after year 148 while its abyss warms by a further half a degree), and the day of crossing is sensitive to short bursts in the score. The distance from the reference is the more meaningful measure, and it is only as good as the reference.
+\item \emph{The reference.} $T_{2000}$ is within about 0.01~$^\circ$C of equilibrium in the volume mean and 0.03~$^\circ$C in the deep level means, with decadal variability of up to 0.01~$^\circ$C in the upper ocean (Section~\ref{sec:2000}). The most accurate configuration's 0.049~$^\circ$C is close to that floor; whether its remaining deep cold bias of 0.01--0.02~$^\circ$C is real cannot be decided with this reference.
+\item \emph{The inner model is an approximation of Veros}: it lags the turbulence energies, replaces the TKE scheme's convection by a switch, omits momentum advection, and ignores operator splitting. The rounds are what correct for this, and their convergence has only been observed, not proved. Measured from $T_{2000}$ every multi-round configuration tried improved from round to round; the apparent divergences seen earlier were errors of $T_{200}$.
+\item \emph{Tuning, and the danger of an imperfect reference.} The settings were chosen by looking at the outcome on this single case, against $T_{200}$, a reference that a real application would not have. Tuning against $T_{200}$ produced a configuration that converged to $T_{200}$'s errors: pseudo-time per round was cut to what the upper ocean needed, which is all $T_{200}$ could see, and 20-day gaps were preferred to 10-day gaps for a loss of accuracy that, against $T_{2000}$, is negligible. The long-round configurations were chosen after $T_{2000}$ became available, from five variants only.
+\item \emph{Cost.} Model days are not the cost of the method (Section~\ref{sec:wall}). For the criterion alone the method is slower than the baseline in wall time at this resolution; for distance from equilibrium it is about 14 times faster.
+\end{itemize}
+
+%======================================================================
+\section{Choices for a new problem, and choices made for the competition}\label{sec:choices}
+%======================================================================
+
+Table~\ref{tab:choices} lists the decisions the method requires. The middle column is what was done here, where the aim was the earliest crossing of one threshold in one known configuration. The right-hand column is what would have to be decided afresh for a different model, resolution, parameterisation or forcing.
+
+{\small
+\renewcommand{\arraystretch}{1.2}
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\textwidth}|p{0.36\textwidth}|p{0.40\textwidth}}
+\caption{Method choices: as made here, and as they would have to be made for an unseen spin-up problem.}\label{tab:choices}\\
+\toprule
+Decision & Here (tuned for the competition) & For a new problem \\
+\midrule
+\endfirsthead
+\toprule
+Decision & Here (tuned for the competition) & For a new problem \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Target &
+One-day temperature score below $10^{-5}$. &
+Equilibrium (or statistical equilibrium). A tendency measure like the score may be the only practical one, but the one-day, whole-ocean form used here is weak: it was met 0.65~$^\circ$C from equilibrium, and it stays near $3\times10^{-6}$ while the abyss warms by half a degree. A longer window and a breakdown by depth (see the Validation row), together with the change of the solution from one round to the next, would make it a much better guide. \\[1ex]
+Warm-up &
+10--30 days, found by scanning. &
+Until the initial adjustment (here convective) has passed and the turbulence fields exist. A usable test that needs no scan is whether the solver's first step is accepted at a step length of about a month. \\[1ex]
+Pseudo-time per round &
+30 years, then 60, 60, and 2000 in the last round. Three rounds of 30--60 years suffice for the score; the 2000-year round is what brings the deep ocean to equilibrium. &
+Set by the slowest time scale of interest, here the abyss (e-folding times of centuries). Use short rounds while the lagged terms are far from their final values, then one round several times longer than the slowest time scale. \\[1ex]
+Rounds and gap &
+Four rounds: 10 days apart for the earliest crossing (L3), 20 days apart for the most accurate state (L2). &
+The gap is the adjustment time of whatever is lagged: tens of days for TKE here, but years of statistics for resolved eddies. Rounds continue until the solution stops changing. \\[1ex]
+What is lagged &
+TKE and EKE energies; coefficients recomputed from them. &
+Whatever the model does not diagnose instantly from the mean state: at eddying resolution, the time-mean eddy fluxes of heat and momentum, as in \citet{cooper2017}; with a seasonal cycle, the seasonal rectification terms. \\[1ex]
+Unknowns &
+Temperature; velocity through a linear steady momentum operator. Salinity is uniform and drops out. &
+Temperature and salinity together. With no surface restoring on salinity the steady problem has a null space (total salt), which needs a constraint. A free surface replaces the rigid-lid constraint. Sea ice, if dynamic, is a further component. \\[1ex]
+Momentum operator &
+Exact transcription of Veros's discrete operator, including its sequential implicit friction; advection omitted. &
+Must be rederived for the model in hand. Advection of momentum might not be negligible at high resolution (Rossby numbers approach 0.1--1 in boundary currents and eddies, and eddy momentum fluxes help drive the time-mean flow; whether it matters for practical accuracy is untested), and if included it would enter as a lagged eddy forcing; quadratic bottom drag needs linearising. \\[1ex]
+Convection &
+Switch: $\kappa_H\ge10$~m$^2$\,s$^{-1}$ where $N^2<0$. &
+Follow the model's own scheme (convective adjustment, KPP, \dots). Some treatment is unavoidable: without it the linearised problem is unstable. \\[1ex]
+Step limits &
+3~$^\circ$C per step (20~$^\circ$C in convecting columns), doubling. &
+The limits depend on how non-linear the problem is; an error estimate for the step would be better than a fixed bound. \\[1ex]
+Matrices &
+Explicit sparse matrices, each written by hand from Veros's code and validated against it. &
+Storage is not the obstacle: the Jacobian is sparse (about 37 non-zeros per row here), and at any resolution it needs about as much memory as a few tens of three-dimensional model fields. The cost is in the writing: every operator (advection scheme, isoneutral mixing, GM, the sequential implicit friction, \dots) has to be transcribed from the model code, tested, and transcribed again whenever the model or its options change. For a large code with many parameterisations that is a substantial and error-prone task. Jacobian--vector products from the model's own tendency routines (finite differences, or automatic differentiation, which Veros's JAX backend should allow; not tried) remove it. Whether a preconditioner is then needed depends on the problem. \citet{cooper2017} needed none. Here, unpreconditioned Bi-CGSTAB converged only for short pseudo-time steps: for the frozen-velocity system, 1189 iterations at $\Delta\tau=0.125$ years and no convergence at 2 years or more; with the circulation responding, no convergence even at 0.125 years (Section~\ref{sec:wall} gives similar results for GMRES). The reason for the difference from \citet{cooper2017} has not been established; the strong vertical mixing of convecting columns and the response of the circulation are the likely causes. If a preconditioner is needed, a simple one may be enough at short steps, and it would be built from part of the matrix, so the likely compromise is to build explicitly only the parts used by the preconditioner. \\[1ex]
+Linear solver &
+Sparse direct, 83{,}000 unknowns. &
+Does not scale. A Krylov method is needed (\citet{cooper2017} used Bi-CGSTAB), probably preconditioned. The cheap preconditioners tried here deal with the vertical stiffness, which dominates at short steps, but not with what dominates at long ones: the response of the circulation, which couples every column of a basin to every other (the eliminated operator $\mathsf{N}\mathsf{K}^{-1}\mathsf{P}\,\partial\rho/\partial T$ is dense), and the slow, large-scale modes of the temperature equation that set the deep equilibrium. A preconditioner for long steps has to approximate both, for example by a coarse-grid or multigrid correction for the large scales combined with an approximate, cheap balance model for the circulation's response (thermal wind plus a barotropic solve). That is a design problem in its own right, not a choice from a library. \\[1ex]
+Validation &
+Distance from a 2000-year run (earlier, a 200-year run, which proved misleading at depth). &
+No reference exists. Checks must be internal: the model's own tendency, as in the score, but over a long window (years to a century rather than a day) and reported by depth, so that a slow deep drift is visible; and agreement between rounds. See the Target row above. Here, for example, the bottom level of the conventional run still changed by 0.15~$^\circ$C RMS over the century before year 200, while the one-day score was below $10^{-5}$. \\[1ex]
+Cost measure &
+Model days. &
+Wall time or energy, including the solves. \\
+\end{longtable}
+}
+
+Two of these deserve emphasis for the high-resolution case that motivates the work.
+\begin{itemize}
+\item \emph{The balance of costs reverses.} Here a linear solve costs as much as about 500 model days, so the method loses in wall time for the criterion, but already wins by a factor of about 14 for equilibrium, because the deep ocean needs about a thousand years of time stepping and the method's long round needs only six linear solves. At eddying resolution a model year is expensive and the number of years needed is set by slow physics, while the coupled linear problem can be posed on the time-mean state; the comparison then depends on the solver, which is the open engineering problem.
+\item \emph{The structure carries over; the numbers do not.} Solving for the circulation with the tracers, marching in implicit pseudo-time, treating convection, patching the full state consistently and repeating after the lagged terms have adjusted are properties of the problem. So, probably, is the need for a last round that is long compared with the slowest physical time scale. Ten- or twenty-day gaps, four rounds, and 60 and 2000 pseudo-years are properties of this test case.
+\end{itemize}
+
+%======================================================================
+\section{The 2000-year reference run}\label{sec:2000}
+%======================================================================
+
+\textbf{Why it was needed.} Until this run all distances were measured from $T_{200}$, and by the end of Experiment~B the method was as close to $T_{200}$ (0.07--0.11~$^\circ$C) as $T_{200}$ was likely to be to equilibrium: between years 175 and 200 the reference run itself still changed by 0.022~$^\circ$C RMS, 0.035~$^\circ$C at the bottom level. Two observations could not be interpreted: Veros restarted from Experiment~A stopped approaching $T_{200}$ at 0.107~$^\circ$C, and long pseudo-time steps moved the bottom level away from $T_{200}$. Either the lagged closures were wrong at depth, or the solver was anticipating a deep adjustment that the 200-year run had not yet made.
+
+\textbf{The run.} Conventional Veros was run from \texttt{Init\_state.restart.h5} for 720{,}000 days, exactly as for $T_{200}$, with the daily score and distance from $T_{200}$ written every day, decadal snapshots of $T$, $u$, $v$, $w$, $\psi$, TKE and EKE, and restart files every 100 years (415~MB in all). It took 6.2 hours (0.031~s per model day). Its state at year 200 is bit-for-bit identical to $T_{200}$. $T_{2000}$ is its temperature at day 720{,}000.
+
+\textbf{How far $T_{200}$ was from equilibrium.} Figure~\ref{fig:2000} summarises the run.
+\begin{itemize}
+\item $T_{200}$ is 0.21~$^\circ$C from $T_{2000}$ overall, 0.09~$^\circ$C at the surface, 0.11~$^\circ$C at 935~m, and 0.51~$^\circ$C at the bottom level. Between years 200 and 2000 the level-mean temperature below 2000~m rises by 0.12--0.49~$^\circ$C, the most at the bottom, and the volume-mean temperature rises from 3.515 to 3.706~$^\circ$C. In the upper 1000~m the level means change by at most 0.10~$^\circ$C.
+\item The conventional run's distance from $T_{2000}$ is 0.26, 0.21, 0.12 and 0.05~$^\circ$C at years 100, 200, 500 and 1000.
+\item The deep warming is slow: exponential fits to the level-mean temperature over years 300--2000 give e-folding times of 450--950 years below 1500~m, against 260--400 years between 150 and 1000~m (after the faster adjustment of the first decades).
+\item The competition score stays near $3\times10^{-6}$ from year 10 to year 2000 (above $10^{-5}$ on 55 scattered days, none after year 148); it does not register the deep warming at all.
+\end{itemize}
+
+\textbf{How close $T_{2000}$ is to equilibrium.} The same fits leave 0.011~$^\circ$C still to come in the volume mean, at most 0.03~$^\circ$C in a level mean (at 2000--3000~m), and under 0.001~$^\circ$C above 1000~m. Over the last century the bottom level changes by 0.003~$^\circ$C RMS. In the upper 700~m the model has internal variability of 0.005--0.012~$^\circ$C RMS from one decade to the next, larger than the remaining drift there. Distances from $T_{2000}$ below about 0.03~$^\circ$C are therefore within the uncertainty of the reference.
+
+\textbf{What it settles.} The two observations that $T_{200}$ could not explain are both explained by $T_{2000}$ (Section~\ref{sec:exp4yr}): the long steps of Experiment~A were moving the bottom towards $T_{2000}$, and the 0.107~$^\circ$C plateau was the error of $T_{200}$. The new reference also showed that the three-round configuration, tuned against $T_{200}$, had converged to a state next to $T_{200}$ rather than to equilibrium, which led to the long final round (Section~\ref{sec:long}).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{reference_2000yr.png}
+\caption{The 2000-year conventional run. (a) Distance from $T_{2000}$ by model level (colours) and over the whole ocean (black); the fall to zero at year 2000 is by construction, and the oscillations of the upper levels after year 1500 are internal variability. (b) Level-mean temperature relative to year 200. (c) Zonal mean of $T_{2000}-T_{200}$. (d) Saved states of Experiment~A and of a single round of Experiment~B, measured from both references.}
+\label{fig:2000}
+\end{figure}
+
+%======================================================================
+\section{Reproducing the results}\label{sec:repro}
+%======================================================================
+
+All scripts are in \texttt{code/} and are run from the repository root. Everything runs in the Python environment in which Veros is installed, with its JAX backend; the plotting scripts also need matplotlib. $T_{200}$ (\texttt{spinup\_200\_72000.restart.h5}) is identical to year 200 of the reference run, which the scripts use in its place, so the scripts that measure distances from $T_{200}$ need that run to have reached year 200.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{p{0.34\textwidth}|p{0.60\textwidth}}
+\toprule
+File & Purpose \\
+\midrule
+\texttt{build\_advection\_matrix.py}, \texttt{build\_vertical\_mixing\_matrix.py}, \texttt{build\_isoneutral\_matrix.py}, \texttt{build\_gm\_matrix.py}, \texttt{build\_combined\_step.py} & The matrices of~\eqref{eq:g} and one temperature step assembled from them; each has a \texttt{test\_*.py} that validates it against Veros (earlier experiments). \\
+\texttt{build\_momentum\_matrix.py} & The steady momentum operator~\eqref{eq:K}, density, friction coefficients, and the streamfunction of a velocity field. \\
+\texttt{test\_momentum\_matrix.py}, \texttt{capture\_momentum\_state.py} & Validation of the operator against captured Veros tendencies. \\
+\texttt{make\_4yr\_restarts.py}, \texttt{solve\_steady\_state\_temperature.py}, \texttt{ablation\_A\_T\_matrices.py} & The 4-year state, and the frozen-velocity solve~\eqref{eq:frozen} with its variants (Table~\ref{tab:swap}). \\
+\texttt{linearity\_test\_velocity.py}, \texttt{compare\_linearity\_test.py} & The linearity test of Section~\ref{sec:why}. \\
+\texttt{coupled\_temperature\_velocity.py} & The coupled problem: tendency~\eqref{eq:g}, Jacobian~\eqref{eq:J}, convective switch, closure update, pseudo-time solver. \\
+\texttt{solve\_coupled\_steady\_state.py} & Experiment~A, the solve (Table~\ref{tab:exp4solve}). \\
+\texttt{restart\_veros\_from\_coupled\_state.py} & Experiment~A, Veros from the solve (Table~\ref{tab:exp4veros}); also holds the routine that patches the model state. \\
+\texttt{spinup\_from\_init.py} & Experiment~B: the whole method from the initial state, one or several rounds. \\
+\texttt{plot\_veros\_from\_coupled.py}, \texttt{plot\_from\_init.py} & Figures~\ref{fig:exp4}, \ref{fig:scan} and~\ref{fig:final}. \\
+\texttt{run\_2000yr\_reference.py} & The 2000-year reference run (Section~\ref{sec:2000}); resumable from a 10-year checkpoint. Output in \texttt{data/intermediate/reference\_2000yr/} and \texttt{data/veros\_restart/reference\_2000yr/}. \\
+\texttt{analyse\_2000yr\_reference.py}, \texttt{plot\_2000yr\_reference.py} & Its analysis (drift, distances by level, fits) and Figure~\ref{fig:2000}. \\
+\texttt{analyse\_states\_vs\_2000yr.py} & Distance of saved states from $T_{200}$ and $T_{2000}$, and the conventional year that is as close. \\
+\texttt{plot\_l2\_patterns.py} & Figure~\ref{fig:l2patterns}. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Commands for the main results:
+\begin{verbatim}
+# the 4-year state, and the frozen-velocity solves of Section 3 (they need T_200)
+python code/make_4yr_restarts.py
+python code/ablation_A_T_matrices.py
+
+# Experiment A
+python code/solve_coupled_steady_state.py
+python code/restart_veros_from_coupled_state.py step05 5 7200 full  # also step09 9, step15 15
+python code/restart_veros_from_coupled_state.py none -1 7200 none   # baseline from year 4
+
+# Experiment B, one round: warm-up 60 days, 7 to 10 steps, energies held
+python code/spinup_from_init.py --warmup 60 --steps 7,8,9,10 --dt-first 0.125 \
+    --closures energies
+
+# Experiment B, three rounds with 20-day gaps: solves on days 20, 40 and 60
+python code/spinup_from_init.py --closures energies --cycles 20:30y:0.125,20:60y:2,20:60y:4
+
+# Experiment B, most accurate configuration (L2): a fourth, 2000-pseudo-year round on day 80
+python code/spinup_from_init.py --closures energies --save-states \
+    --cycles 20:30y:0.125,20:60y:2,20:60y:4,20:2000y:32
+
+# Experiment B, fastest configuration (L3): solves on days 10, 20, 30, long round on day 40,
+# then 10 years of Veros (--confirm stops the run only after that many days below 1e-5)
+python code/spinup_from_init.py --closures energies --save-states --post-days 3600 \
+    --confirm 100000 --cycles 10:30y:0.125,10:60y:2,10:60y:4,10:2000y:32
+# L4 and L5: --cycles 10:30y:0.125,10:60y:2,10:60y:4,20:2000y:32
+#            --cycles 10:30y:0.125,10:60y:2,10:60y:4,10:60y:4,10:2000y:32
+
+# the 2000-year reference (about 6 hours), then its analysis
+python code/run_2000yr_reference.py
+python code/analyse_2000yr_reference.py
+python code/analyse_states_vs_2000yr.py \
+    data/intermediate/from_init/cycles_<tag>_states.npz
+\end{verbatim}
+
+In \texttt{--cycles}, each entry is ``days of Veros before the solve : pseudo-years (or number of steps) : first $\Delta\tau$ in years''. Results are written to \texttt{data/intermediate/from\_init/}, one line per run in \texttt{summary.txt}. With \texttt{--save-states} the temperature after each solve, on the day of crossing, every 360 days and at the end is saved to \texttt{cycles\_<tag>\_states.npz} in the same directory; \texttt{--post-days} and \texttt{--confirm} set how long Veros runs after the last solve. The crossing day reported in \texttt{summary.txt} is the first day below $10^{-5}$ \emph{after the last solve}. Days between rounds are written to \texttt{cycles\_<tag>.csv} but are not checked against the threshold, so for a run that meets the criterion before its last solve, the first crossing must be read from the CSV.
+
+One practical point: the Veros setup module must be imported before any module that imports \texttt{veros.core}. The setup selects Veros's JAX backend when it is imported; if the solver modules are imported first, Veros silently runs on its NumPy backend, with the same results but at about half the speed. Experiment~A was run that way, which affects none of its results but would distort a wall-time comparison.
+
+\begin{thebibliography}{9}
+\bibitem[Cooper(2017)]{cooper2017} Cooper, F.~C., 2017: A potential method to accelerate spin up of turbulent ocean models. \textit{Ocean Modelling}, \textbf{120}, 79--82. \href{https://doi.org/10.1016/j.ocemod.2017.10.008}{doi:10.1016/j.ocemod.2017.10.008}
+\bibitem[Kelley and Keyes(1998)]{kelleykeyes1998} Kelley, C.~T., Keyes, D.~E., 1998: Convergence analysis of pseudo-transient continuation. \textit{SIAM J. Numer. Anal.}, \textbf{35}, 508--523. \href{https://doi.org/10.1137/S0036142996304796}{doi:10.1137/S0036142996304796}
+\end{thebibliography}
+
+\end{document}

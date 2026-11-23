@@ -1,0 +1,173 @@
+\documentclass{article}
+    % General document formatting
+    \usepackage[margin=0.7in]{geometry}
+    \usepackage[parfill]{parskip}
+    \usepackage[utf8]{inputenc}
+
+    % Related to math
+    \usepackage{amsmath,amssymb,amsfonts,amsthm}
+
+    % Others
+    \usepackage{graphicx}
+    \usepackage[square,numbers]{natbib}
+    \usepackage{url}
+    \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+    \usepackage{booktabs}
+    \usepackage{array}
+    \usepackage{xcolor}
+    % \chg{} marks changes in red
+    \newcommand{\chg}[1]{{\color{red}#1}}
+    \setlength{\emergencystretch}{3em}
+\title{Which part of the model equilibrates faster: temperature or dynamics?}
+\author{Fenwick C. Cooper$^1$}
+\date{%
+    $^1$University of Oxford, UK \\[2ex]
+    \today
+}
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+This document, and the code and computations it reports, were produced almost entirely by the AI assistant Claude, following the human author's instructions over several iterations. The human author reviewed the text for clarity, relevance and quality, and takes responsibility for its content. Everything is specific to the setup in \url{https://past2future.org/2026/09/11/ocean-model-spin-up-competition/}.
+These experiments use the same model, grid and prognostic variables as \texttt{veros\_discretisation.tex}.
+Sections~\ref{sec:initstate} and~\ref{sec:validation} record two pieces of groundwork done alongside them: the inconsistency of the competition's initial state, and the validation against Veros of the matrices built from \texttt{veros\_discretisation.tex}.
+
+\section{Score}\label{sec:score}
+
+For a prognostic field $X$, with $X_0$ fixed as its value in \texttt{Init\_state.restart.h5},
+\[
+\text{score}_X = \frac{\lVert \phi(X_\ast) - X_\ast \rVert}{\lVert X_\ast \rVert + \lVert X_0 \rVert},
+\]
+where $X_\ast$ is the value of $X$ at the start of a model day, $\phi(X_\ast)$ is Veros's value one day later, and $\lVert\cdot\rVert$ is the $L^2$ norm over the interior ocean grid. A single time step (one call to Veros's \texttt{step()}) is exactly one model day, since the model clock advances by $dt_\text{tracer}=86400$~s at every call. Latitude weighting is not used unless otherwise stated. Each variable is judged against its own $X_0$ and $X_\ast$, so a velocity is scored on the scale of velocities, salinity on the scale of salinities, and so on.
+
+In every experiment in this document, $\phi$ is always one complete, unmodified call to Veros's \texttt{step()}: the full coupled dynamics and thermodynamics, with nothing turned off or bypassed. In the experiments below, some variables are \emph{clamped} -- reset to a fixed field immediately after every call to $\phi$, before the next step begins. Clamping is a correction applied \emph{after} $\phi$, not a change to $\phi$ itself: within a single call, a clamped variable (e.g.\ temperature in Experiment~\ref{sec:exp1}) evolves exactly as the full model dictates, feeding back on every other variable through the usual dynamics, and is only reset afterwards. The score is computed solely for the variables that are \emph{not} clamped. This is why, even once the system has reached what looks like an equilibrium, the score for a free variable need not be zero: it is only clamped variables whose $X_\ast$ is unchanging step to step, not the free ones, and the free variables continue to respond to the full dynamics every step, including to the fixed forcing imposed by whatever is clamped. When that fixed forcing is itself the true joint equilibrium (as in Experiment~\ref{sec:exp1}), the free variables can relax to their own matching equilibrium and the score does fall to the convergence threshold; when it is not (as in Section~\ref{sec:jumpstart_clamped}, where temperature is clamped to the wrong value), no such exact fixed point exists for the free variables, and the score instead settles to a nonzero floor.
+
+\section{Experiment 1: temperature fixed, dynamics free}\label{sec:exp1}
+
+Temperature is clamped to its equilibrium value from \texttt{spinup\_200\_72000.restart.h5} at every time level, before the run starts and again after every step, so that it is never advected, diffused or otherwise changed (clamping at all three of temperature's stored time levels, not just the one Veros is currently reading from, is essential for a genuinely constant field -- see the note in Section~\ref{sec:jumpstart_clamped}). Every other prognostic variable -- $u$, $v$, $w$, salinity, $e$ (TKE), $E$ (EKE) and $\psi$ -- is initialised from \texttt{Init\_state.restart.h5} and left to evolve normally for 10{,}000 model days.
+
+Figure~\ref{fig:combined} shows $\text{score}_X$ for $u$, $v$, $e$ and $E$ (salinity, $w$ and $\psi$ are left out of the figure for clarity). Salinity in \texttt{Init\_state.restart.h5} is exactly spatially uniform (to a standard deviation of about $7\times10^{-15}$), and with zero surface salt flux in this setup it is already an exact fixed point of its own equation, so $\text{score}_\text{salt}$ stays at the level of rounding error ($\sim 2.5\times10^{-16}$) throughout; $w$ is not an independent prognostic variable at all -- it is diagnosed algebraically from $u$ and $v$ by the continuity equation at every step -- so its score adds no information beyond what $u$ and $v$ already show. $\psi$ equilibrates fastest of all, crossing the $10^{-5}$ threshold at model day 672.
+
+Of the variables in Figure~\ref{fig:combined}, $u$ crosses the $10^{-5}$ threshold at day 672 and $v$ at day 1767. $e$ and $E$ do not cross the threshold within the 10{,}000-day run (their minima over the run are about $4.5\times10^{-4}$ and $1.4\times10^{-5}$ respectively): with temperature fixed, the circulation itself settles quickly, but the turbulence closures retain a slow, low-level drift.
+
+\section{Experiment 2: dynamics fixed, temperature free}\label{sec:exp2}
+
+The mirror image of Experiment~\ref{sec:exp1}: $u$, $v$, $w$, salinity, $e$, $E$ and $\psi$ are all clamped (at all three stored time levels) to their \texttt{spinup\_200\_72000} equilibrium values at every time level, while temperature alone is initialised from \texttt{Init\_state.restart.h5} and left to evolve normally. With an already-equilibrated circulation, $\text{score}_\text{temp}$ crosses the $10^{-5}$ threshold at model day 2232 -- substantially sooner than the 3714 days taken when temperature and the circulation are integrated together from \texttt{Init\_state.restart.h5} (the baseline, direct-integration run).
+
+Figure~\ref{fig:combined} shows both of these temperature trajectories, in the same colour, alongside the Experiment~\ref{sec:exp1} curves above; the dashed line is the direct-integration baseline and the solid line is Experiment~\ref{sec:exp2}'s fixed-circulation run.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{equilibration_exp1_exp2_combined.png}
+\caption{Experiments 1 and 2 combined: $u$, $v$, $e$ (TKE) and $E$ (EKE) from Experiment~\ref{sec:exp1} (temperature fixed), and temperature from Experiment~\ref{sec:exp2} (dynamics fixed) and from the direct-integration baseline (dashed, same colour as Experiment~\ref{sec:exp2}'s temperature). The vertical line marks model day 1440 (4 model years), the point from which the jump-started run of Section~\ref{sec:jumpstart} is restarted.}
+\label{fig:combined}
+\end{figure}
+
+Taken together, these curves show that it is the \emph{temperature field}, not the circulation, that is the harder part of this spin-up to equilibrate: even with an already-equilibrated circulation (Experiment~\ref{sec:exp2}), temperature alone still takes over two thousand days to settle, substantially longer than the few hundred days $u$, $v$ and $\psi$ take to equilibrate when temperature is instead held fixed (Experiment~\ref{sec:exp1}); and no amount of algebraic cleverness applied to temperature alone makes up the difference, and can easily make things worse, as the next section shows.
+
+\section{The linear-solve jump start, all variables}\label{sec:jumpstart}
+
+Section~\ref{sec:exp2} compared the direct-integration baseline against an idealised case with a perfectly equilibrated circulation. A separate experiment tests a more practical idea: can a linear solve for temperature alone accelerate ordinary spin-up? Veros was run for 4 model years (1440 days) from \texttt{Init\_state.restart.h5}; the resulting state was used to build and solve the combined linear system $A_T\,T=-b$ for an approximately-equilibrated temperature (the frozen-coefficient solve of \texttt{coupled\_spinup.tex}, Section ``Why the frozen-velocity solve fails here'', built from the matrices of the main discretisation document); that temperature was written back into the 4-year restart file in place of the model's own temperature; and the model was restarted from there with \emph{every} variable -- not just temperature -- left free to evolve normally. The run was stopped after 2274 days (total model day 3714), matching the length of the direct-integration baseline in Section~\ref{sec:exp2}, so the two can be compared on the same day range.
+
+\subsection{Restarting correctly: the Adams--Bashforth tendency}\label{sec:jumpstart_ab}
+
+Substituting only $T_\text{solved}$ into the restart's temperature leaves one piece of the model's state inconsistent with it. Temperature advection uses Adams--Bashforth~2 (the ``Spatial discretisation of the advection term'' section of the main discretisation document), which needs not the temperature at a previous time level but the \emph{advective tendency} from the previous step, cached in a separate array (\texttt{core/dtemp}, at its \texttt{taum1} slot) and combined with the freshly computed tendency at the current step. Substituting temperature alone leaves this cached tendency computed from the real, un-replaced 4-year temperature field, inconsistent with $T_\text{solved}$.
+
+This was corrected before restarting: writing $g = M\,T_\text{solved}$ into \texttt{core/dtemp}'s \texttt{taum1} slot, where $M$ is the (purely velocity-dependent) advection matrix used throughout this and the main discretisation document (the \texttt{tau} slot is recomputed fresh by Veros at the start of every step regardless of what is on disk, so patching it would have no effect). As a check that this was done correctly, $g$ was compared directly against Veros's own advection kernel, called on the patched restart so that nothing else could change $u$, $v$ first: the two agree to a relative error of $3\times10^{-8}$. The results below are from the model restarted with this corrected state.
+
+\subsection{Results}\label{sec:jumpstart_results}
+
+Figure~\ref{fig:jumpstart} shows $\text{score}_X$ for $u$, $v$, $e$, $E$ and temperature over the 2274 days following the restart (plotted against days since the restart, not total model day), using the same colours as Figure~\ref{fig:combined}, together with the direct-integration baseline's temperature score over the same 2274 days (dashed, for reference). Every variable receives a sharp shock from the temperature replacement, not just temperature itself: $u$, $v$ and $E$ peak within 2 days at scores of order $5$--$17\times10^{-2}$, and $e$ peaks at day 4 with a score greater than $1$ -- an order of magnitude larger than its own initial value -- before slowly relaxing. Temperature's own shock (peaking at $5.4\times10^{-3}$ on day 4) is, in fact, the mildest of the five: replacing only the temperature field still most strongly disturbs the variables that were not touched directly, because the circulation was relying on the old, self-consistent temperature field to stay in balance. Even so, the jump-started temperature remains well above the baseline throughout, which never approaches $e$, $E$, $u$ or $v$'s level of disturbance at all. None of the five variables returns to below the $10^{-5}$ threshold within the 2274 days shown, confirming that the shock seen in Section~\ref{sec:exp2} is a genuine consequence of jump-starting the temperature field, not an artefact of an inconsistent restart.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{jumpstart_variable_scores_dtemp.png}
+\caption{The jump-started run, with the Adams--Bashforth tendency corrected (Section~\ref{sec:jumpstart_ab}): $\text{score}_X$ for $u$, $v$, $e$ (TKE), $E$ (EKE) and temperature, all free to evolve, after restarting from the 4-year warm-up state with temperature replaced by its linear-solve estimate, together with the direct-integration baseline's temperature score (dashed) over the same 2274 days.}
+\label{fig:jumpstart}
+\end{figure}
+
+\section{Isolating the shock: temperature clamped to the (wrong) linear-solve estimate}\label{sec:jumpstart_clamped}
+
+Section~\ref{sec:jumpstart}'s shock could in principle come from two distinct effects, entangled together: the temperature field itself being wrong (not the true, converged equilibrium, since the circulation at 4 years has not yet converged either), and the circulation simply not having had time to adjust to \emph{any} new temperature field, right or wrong. To isolate the second effect on its own, temperature is clamped -- overwritten back to the linear-solve estimate after every step, so it never changes again, by construction -- while $u$, $v$, $e$ and $E$ are left free, starting from the real (un-replaced) 4-year warm-up state. This is the mirror of Experiment~\ref{sec:exp1}, but equilibrating towards the \emph{wrong} temperature (the linear-solve estimate) rather than the true \texttt{spinup\_200\_72000} equilibrium. Clamping sidesteps the Adams--Bashforth subtlety of Section~\ref{sec:jumpstart_ab} entirely, since temperature is overwritten regardless of what tendency Veros computes for it internally. As throughout this section, the run is stopped after 2274 days, matching the direct-integration baseline.
+
+A subtlety in implementing the clamp is worth noting, since getting it wrong is easy and the symptom is misleading: temperature must be overwritten at \emph{all three} of its stored time levels, not just the one Veros is currently reading from. Writing the fixed field into only the current time level leaves the other two holding the original, un-replaced temperature; since Veros's internal time-level index cycles through all three slots with period 3, an incomplete clamp of this kind makes the model switch between the fixed field and the original one every three days, producing a spurious few-day oscillation with no physical meaning. The result below clamps all three time levels.
+
+Figure~\ref{fig:jumpstart_clamped} shows the result, and it is a smaller-amplitude version of Experiment~\ref{sec:exp1}'s behaviour, not a qualitatively different one: $u$, $v$, $e$ and $E$ relax away from their initial shock and settle into a flat, constant floor within roughly 600--800 days, remaining there, unchanged to several significant figures, for the rest of the 2274-day run -- $u\approx1.0\times10^{-4}$, $v\approx1.6\times10^{-4}$, $e\approx1.9\times10^{-3}$, $E\approx1.0\times10^{-2}$. None of the four variables crosses the $10^{-5}$ threshold within this window, but all four do genuinely equilibrate, in the sense of reaching a steady state -- just not the correct one. This floor is $10^2$--$10^4$ times higher than Experiment~\ref{sec:exp1}'s true-equilibrium floor (Figure~\ref{fig:combined}), which makes physical sense: friction can balance a steady but wrong forcing, it just cannot cancel it exactly. So the answer to ``how long does it take to equilibrate to the wrong state'' is that it takes about the same order of time as Experiment~\ref{sec:exp1}'s equilibration to the \emph{right} state (a few hundred days), but arrives at a permanently biased circulation rather than the correct one.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{jumpstart_clamped_wrong_temp_fixed.png}
+\caption{Temperature clamped to the linear-solve estimate throughout (never left free, and clamped at all three time levels), starting from the real 4-year warm-up state: $\text{score}_X$ for $u$, $v$, $e$ (TKE) and $E$ (EKE), the same colours as Figure~\ref{fig:combined}.}
+\label{fig:jumpstart_clamped}
+\end{figure}
+
+\section{The competition's initial state}\label{sec:initstate}
+
+In \texttt{Init\_state.restart.h5} (model time 360 days) the salinity is the same in every ocean cell, $34.718086642~\text{g}\,\text{kg}^{-1}$, but the stored density $\rho$, stratification $N^2$, dynamic enthalpy $H_d$ and its derivatives $I_T$, $I_S$ are \emph{not} those of the stored temperature and salinity. At every stored time level, $\rho$ differs from the density of the stored temperature and uniform salinity by up to $3.05~\text{kg}\,\text{m}^{-3}$, and $N^2$ by up to $2.6\times10^{-4}~\text{s}^{-2}$ (its largest value is $8\times10^{-4}~\text{s}^{-2}$).
+The stored density is reproduced to rounding error by the stored temperature together with a non-uniform salinity between $30.9$ and $37.2~\text{g}\,\text{kg}^{-1}$, which correlates at $0.96$ with the salinity of the forcing file and whose volume mean is the uniform value in the file.
+The initial state is therefore that of a one-year run with a realistic salinity, in which the salinity was afterwards replaced by its volume mean without recomputing the fields derived from it.
+
+The first Veros step takes its pressure gradient and its mixing coefficients from the stored $\rho$ and $N^2$; from the second step on, the density is that of the temperature alone. The velocities, $\psi$, $e$ and $E$ of the initial state belong to the density of the realistic salinity, not to the density that the model has from then on. Two measures of the difference:
+\begin{itemize}
+\item Of the $26{,}178$ interior faces between ocean cells, $1460$ ($5.6\%$) that are stably stratified in the stored $N^2$ are statically unstable for the density of the temperature alone; $7.4\%$ are unstable in all, against $2.0\%$ in the stored field.
+\item The steady circulation for the stored density (the solution of the steady momentum operator $\mathsf{K}$ of \texttt{coupled\_spinup.tex}) differs from the stored $u$ and $v$ by $24\%$ and $41\%$ (that state is only one year into a run), whereas the steady circulation for the density of the temperature alone differs from them by $97\%$ and $210\%$.
+\end{itemize}
+This is the origin of the shock on day 0 described in \texttt{coupled\_spinup.tex} (Section ``Experiment B: from the initial state'').
+In the 200-year state (\texttt{spinup\_200\_72000.restart.h5}) all stored fields are consistent: $\rho$ and $N^2$ recomputed from its temperature and salinity equal the stored arrays to $7\times10^{-13}~\text{kg}\,\text{m}^{-3}$ and $3\times10^{-16}~\text{s}^{-2}$, and its salinity varies by only $10^{-9}~\text{g}\,\text{kg}^{-1}$.
+
+\section{Validation of the matrices against Veros}\label{sec:validation}
+
+Each matrix of the temperature equation in \texttt{veros\_discretisation.tex} was built by its own script, from the fields of a restart file alone, and compared with the Veros routine that applies the same term (scripts in \texttt{code/}). Every comparison was made for both \texttt{spinup\_200\_72000.restart.h5} and \texttt{Init\_state.restart.h5}, and passed for both; Table~\ref{tab:validation} gives the larger error of the two.
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+%
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.15\textwidth}|>{\raggedright\arraybackslash}p{0.12\textwidth}|>{\raggedright\arraybackslash}p{0.43\textwidth}|>{\raggedright\arraybackslash}p{0.2\textwidth}}
+\toprule
+Term & Matrices & Compared with (Veros routine) & Largest error \\
+\midrule
+Advection & $\mathsf{M}$ & Tendency of \texttt{advect\_tracer}, for the model temperature and three random fields (random on land too). & $4\times10^{-12}$ (a) \\
+Vertical mixing and surface flux & $\mathsf{D}$, $\mathsf{R}$, $\mathbf{b}$ & One implicit step of \texttt{vertmix\_tempsalt}, for the model temperature and two random fields; repeated with a surface 3~K colder, which ice-masks two or three columns. & $6\times10^{-12}$ (a) \\
+Isoneutral diffusion & $\mathsf{E}$, $\mathsf{D}_{33}$ & $K_{11}$, $K_{22}$, $K_{33}$ and the triad slopes of \texttt{isoneutral\_diffusion\_pre}; one step of \texttt{isoneutral\_diffusion} (explicit part and implicit $K_{33}$ solve), for $T$ and $S$. & identical; $1.4\times10^{-14}$ (b) \\
+GM skew diffusion & $\mathsf{F}$ & $K_\text{gm}$ of \texttt{set\_eke\_diffusivities}; one step of \texttt{isoneutral\_skew\_diffusion}, for $T$ and $S$. & $4\times10^{-16}$ (a); $9\times10^{-16}$ (b) \\
+Inputs & & $Q_\text{net}$, $Q_\text{nec}$, $T_\text{clim}$ and $\kappa_H$ (\texttt{set\_tke\_diffusivities}). & $5\times10^{-18}$ (a) \\
+\midrule
+One temperature step & all of the above & The temperature after one complete Veros step (\texttt{model.step()}), with the stored advective tendency of the previous step. & $2\times10^{-6}$ (c) \\
+\bottomrule
+\end{tabular}
+\caption{Validation of the temperature matrices against Veros. (a) Largest error relative to the largest value of the Veros quantity. (b) Largest error, in $^\circ$C or g\,kg$^{-1}$, of the temperature or salinity after the step. (c) Largest error relative to the largest change of temperature in the step (absolute errors $5\times10^{-9}$ and $1\times10^{-8}~^\circ$C).}
+\label{tab:validation}
+\end{table}
+
+The same scripts check that the rows and columns of land cells are zero, that $\mathsf{D}$ and $\mathsf{D}_{33}$ conserve heat in each column (thickness-weighted column sums are zero) and that $\mathsf{E}$ and $\mathsf{F}$ conserve heat over the ocean (cell-volume-weighted sums are zero). The scripts are \texttt{test\_advection\_matrix.py}, \texttt{test\_vertical\_mixing\_matrix.py}, \texttt{test\_isoneutral\_matrix.py}, \texttt{test\_gm\_matrix.py} and \texttt{test\_combined\_step.py}, for the matrices built by the corresponding \texttt{build\_*.py}.
+
+The momentum matrices are validated in \texttt{coupled\_spinup.tex} (Section ``The steady momentum operator''). The matrices of the two non-linear momentum terms, advection and the metric terms ($\mathsf{M}_u$, $\mathsf{M}_v$, $\mathsf{T}_u$, $\mathsf{T}_v$ in \texttt{veros\_discretisation.tex}), are transcribed from the source and were not tested separately; they are left out of the steady momentum operator, and their size, $0.1\%$ of the Coriolis term, comes from Veros's own tendencies.
+
+\section{Reproducing the results}\label{sec:repro}
+
+All scripts are in \texttt{code/} and are run from the repository root, in the Python environment in which Veros is installed; the plotting script also needs matplotlib. The experiments that clamp variables to the 200-year state, and the validation against it, use year 200 of the 2000-year reference run (\texttt{run\_2000yr\_reference.py}, \texttt{coupled\_spinup.tex}), which is identical to \texttt{spinup\_200\_72000.restart.h5}.
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.45\textwidth}|>{\raggedright\arraybackslash}p{0.5\textwidth}}
+\toprule
+Script & Purpose \\
+\midrule
+\texttt{score\_timeseries\_from\_init\_state.py} & The direct-integration baseline from \texttt{Init\_state.restart.h5} (Section~\ref{sec:score}). \\
+\texttt{equilibration\_experiment\_fixed.py exp1}, \texttt{exp2} & Experiments~1 and~2. \\
+\texttt{make\_4yr\_restarts.py} & The 4-year state, and the same state with the linear-solve temperature. \\
+\texttt{patch\_dtemp\_and\_verify.py}, \texttt{jumpstart\_variable\_scores\_dtemp.py} & The corrected Adams--Bashforth tendency and the jump-started run (Section~\ref{sec:jumpstart}). \\
+\texttt{jumpstart\_clamped\_wrong\_temp\_fixed.py} & Temperature clamped to the linear-solve estimate (Section~\ref{sec:jumpstart_clamped}). \\
+\texttt{plot\_equilibration\_experiments.py} & Figures~\ref{fig:combined}, \ref{fig:jumpstart} and~\ref{fig:jumpstart_clamped}. \\
+\texttt{diagnose\_initial\_state.py} & The numbers of Section~\ref{sec:initstate}. \\
+\texttt{test\_*.py}, \texttt{build\_combined\_step.py}, \texttt{capture\_momentum\_state.py} & The validation of Section~\ref{sec:validation} (\texttt{capture\_momentum\_state.py a} and \texttt{b} before \texttt{test\_momentum\_matrix.py}). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

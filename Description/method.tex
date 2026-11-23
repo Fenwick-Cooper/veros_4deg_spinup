@@ -1,0 +1,105 @@
+\documentclass{article}
+    % General document formatting
+    \usepackage[margin=0.7in]{geometry}
+    \usepackage[parfill]{parskip}
+    \usepackage[utf8]{inputenc}
+    
+    % Related to math
+    \usepackage{amsmath,amssymb,amsfonts,amsthm}
+    
+    % Others
+    \usepackage{graphicx}
+    \usepackage[square,numbers]{natbib}
+    \usepackage{url}
+    \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+\title{Veros $4^{\text{o}}$ ocean spin-up}
+\author{Fenwick C. Cooper$^1$}
+\date{%
+    $^1$University of Oxford, UK \\[2ex]
+    \today
+}
+\begin{document}
+\maketitle
+
+Our aim here is to spin up the Veros ocean model using the $4^{\text{o}}$ configuration at \url{https://past2future.org/2026/09/11/ocean-model-spin-up-competition/}. The longer term goal is to find a method to spin up higher resolution models.
+
+We use the method put forward in \cite{Cooper2017} and adapted for this problem. Taking advantage of the fact that the velocity equilibrates at a faster rate than the temperature field, the basic method in \cite{Cooper2017} is:
+\begin{enumerate}
+\item Run the ocean model for a short time to spin up to some extent and to bring fields into balance.
+\item Linearise the temperature tendency about the current state and implicitly solve for the equilibrium.
+\item Repeat until spin-up is achieved.
+\end{enumerate}
+The changes here include:
+\begin{itemize}
+\item Unlike in \cite{Cooper2017}, here the temperature feeds back strongly onto the velocity. As suggested in that paper, this was handled by inclusion of a linear equation for velocity, instantaneously slaved to the temperature.
+\item The equilibrium solve used LU factorisation (affordable at $4^{\text{o}}$) instead of Bi-CGSTAB (used in \cite{Cooper2017} for higher resolution), combined with implicit pseudo-time stepping \cite{kelleykeyes1998} of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
+\item At $4^{\text{o}}$ resolution eddies are not resolved, enabling use of a linear equation for velocity. In an eddying flow, as in \cite{Cooper2017}, time mean equations need to be used.
+\end{itemize}
+
+\section*{Results}
+
+%\begin{table}
+\begin{center}
+\begin{tabular}{l|p{2.4cm}|p{2.4cm}|p{2.2cm}}
+Method & Model day that score $< 10^{-5}$ & Wall-clock time \newline (Apple M3 Pro) & RMS distance to $T_{2000}$ \\ 
+\hline
+Veros 3714 day run & 3714 & 2.5 minutes & 0.65 $^{\text{o}}$C \\  
+Veros 200 year run & - & 37 minutes & 0.21 $^{\text{o}}$C \\
+Veros 1000 year run & - & $\sim3$ hours & 0.05 $^{\text{o}}$C \\
+Competition spin-up & 63 & 10 minutes & 0.06 $^{\text{o}}$C \\
+Equilibrium spin-up & 93 & 13 minutes & 0.05 $^{\text{o}}$C \\
+\end{tabular}
+\end{center}
+{\bf Competition spin-up:} Veros is run for 10 days followed by a round of implicit time stepping. This is repeated four times and then Veros is run until the score $<10^{-5}$. {\bf Equilibrium spin-up:} The same but with Veros run for 20 days between four rounds of implicit time stepping. $T_{2000}$ is the model temperature at the end of a 2000 year integration.
+%\label{table:results}
+%\end{table}
+
+The competition criterion is met in 63 model days and stays met for at least the next ten years. However, this neglects the cost of four rounds of implicit time stepping, which makes the method slower than Veros alone. The wall-clock time includes the implicit time stepping, but does not reflect that the optimal algorithm and relative run times change with resolution. The spun-up state can be improved by increasing the number of Veros days between rounds of implicit time stepping from 10 to 20. In 13 minutes Veros was brought as close to its equilibrium as a direct integration taking approximately 3 hours ($14 \times$ faster).
+
+\newpage
+
+\section*{Code}
+
+All source code and extra documentation can be found at \url{https://github.com/Fenwick-Cooper/veros_4deg_spinup}. Clone the repo to use the code.
+
+To run the ``Competition spin-up'' method run \texttt{python competition\_spin-up.py}. The output is a Veros restart file \texttt{competition.restart.h5} containing the spun-up state.
+
+To run the ``Equilibrium spin-up'' method run \texttt{python equilibrium\_spin-up.py}. The output is a Veros restart file \texttt{equilibrium.restart.h5} with the state equivalent to an approximately 1000 year Veros integration.
+
+\section*{Note}
+
+Creating the exact sparse matrices specific to each term in an ocean model is labour intensive. However, AI assistants can now automate this step and it is relatively easy to check that a matrix is correct. Once the matrices have been extracted, it is much easier to play around with various time-stepping schemes. We first used Claude to reverse engineer and document the precise Veros integration scheme (\texttt{veros\_discretisation.pdf}). Then after preliminary tests established that the velocity must respond to the temperature during the solve (\texttt{equilibration\_experiments.pdf}), we applied the technique to Veros (see \texttt{coupled\_spinup.pdf} for a detailed write-up).
+
+\begin{center}
+\begin{tabular}{ll}
+File & Description \\ 
+\hline
+\texttt{Description/veros\_discretisation.pdf} & Veros's precise numerical scheme. \\
+\texttt{Description/equilibration\_experiments.pdf} & Initial experiments. \\
+\texttt{Description/coupled\_spinup.pdf} & Detailed documentation of the method and the results. \\
+\texttt{competition\_spin-up.py} & Spin up Veros in 63 days. \\
+\texttt{equilibrium\_spin-up.py} & Spin up Veros close to equilibrium. \\
+\end{tabular}
+\end{center}
+
+The effort involved in all of these tasks was substantially reduced through the use of Claude; however, we directed the work, maintained oversight, understand what we are doing, have read and revised the documents many times and have checked the main results independently. This document was written by a human and checked for errors by Claude.
+
+\begin{thebibliography}{9}
+\bibitem{Cooper2017} Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. \textit{Ocean Modelling}, \textbf{120}, 79--82. \url{https://doi.org/10.1016/j.ocemod.2017.10.008}
+\bibitem[Kelley and Keyes(1998)]{kelleykeyes1998} Kelley, C.~T., Keyes, D.~E., 1998: Convergence analysis of pseudo-transient continuation. \textit{SIAM J. Numer. Anal.}, \textbf{35}, 508--523. \href{https://doi.org/10.1137/S0036142996304796}{doi:10.1137/S0036142996304796}
+\end{thebibliography}
+
+\end{document}
+
+
+
+
+
+Todo:
+	Create the repo and upload.
+	Test the spin-up scripts
+	Send the entry email
+
+
+
+

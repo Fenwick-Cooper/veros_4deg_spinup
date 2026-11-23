@@ -1,0 +1,1201 @@
+\documentclass{article}
+    % General document formatting
+    \usepackage[margin=0.7in]{geometry}
+    \usepackage[parfill]{parskip}
+    \usepackage[utf8]{inputenc}
+    
+    % Related to math
+    \usepackage{amsmath,amssymb,amsfonts,amsthm}
+    
+    % Others
+    \usepackage{graphicx}
+    \usepackage[square,numbers]{natbib}
+    \usepackage{url}
+    \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+    \usepackage{xcolor}
+    % \chg{} marks changes in red
+    \newcommand{\chg}[1]{{\color{red}#1}}
+\title{Veros discretisation}
+\author{Fenwick C. Cooper$^1$}
+\date{%
+    $^1$University of Oxford, UK \\[2ex]
+    \today
+}
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+This document, and the code and computations it reports, were produced almost entirely by the AI assistant Claude, following the human author's instructions over several iterations. The human author reviewed the text for clarity, relevance and quality, and takes responsibility for its content.
+Everything is specific to the setup in \url{https://past2future.org/2026/09/11/ocean-model-spin-up-competition/}.
+
+The prognostic variables of this setup are the temperature $T$, the salinity $S$, the horizontal velocities $u$ and $v$, the barotropic streamfunction $\psi$, the turbulent kinetic energy $e$ and the eddy kinetic energy $E$.
+Section~\ref{sec:grid} gives the coordinates, the grid and the masks; Sections~\ref{sec:temperature} to~\ref{sec:closures} give the equation and the discretisation of each; Section~\ref{sec:step} gives the order in which one model time step applies them, and lists what the model state consists of.
+Every formula is that of the Veros source for the settings of this setup; options that are switched off are not described.
+
+\section{Coordinates, grid and masks}\label{sec:grid}
+
+\subsection{Coordinates and differential operators}\label{sec:coords}
+The continuous equations are written in spherical coordinates: longitude $\lambda$, latitude $\phi$ and height $z$ (positive upward, with $z=0$ at the rigid-lid surface), and $a$ is the radius of the Earth. For a scalar $f$ and a vector field $\mathbf{F} = (F_\lambda, F_\phi, F_z)$,
+\[
+\nabla f = \left( \frac{1}{a\cos\phi}\frac{\partial f}{\partial\lambda},\; \frac{1}{a}\frac{\partial f}{\partial\phi},\; \frac{\partial f}{\partial z} \right),
+\qquad
+\nabla_h f = \left( \frac{1}{a\cos\phi}\frac{\partial f}{\partial\lambda},\; \frac{1}{a}\frac{\partial f}{\partial\phi} \right),
+\]
+\[
+\nabla\cdot\mathbf{F} = \frac{1}{a\cos\phi}\frac{\partial F_\lambda}{\partial\lambda} + \frac{1}{a\cos\phi}\frac{\partial(F_\phi\cos\phi)}{\partial\phi} + \frac{\partial F_z}{\partial z},
+\]
+where $\nabla_h$, the horizontal part of $\nabla$, is used wherever a term is explicitly horizontal-only (horizontal friction and horizontal mixing, Sections~\ref{sec:uvw} and \ref{sec:eke}). The Laplacians are
+\[
+\nabla^2 f = \nabla\cdot\nabla f,
+\qquad
+\nabla_h^2 f = \nabla_h\cdot\nabla_h f = \frac{1}{a^2\cos^2\phi}\frac{\partial^2 f}{\partial\lambda^2} + \frac{1}{a^2\cos\phi}\frac{\partial}{\partial\phi}\!\left(\cos\phi\,\frac{\partial f}{\partial\phi}\right),
+\]
+with $\nabla_h^2$ (the horizontal Laplacian) used in the same horizontal-only terms above and in the $\psi$ Poisson equation (Section~\ref{sec:psi}). For a horizontal vector field $\mathbf{F}_h = (F_\lambda, F_\phi)$, the vertical component of the curl is
+\[
+\hat{\mathbf{z}}\cdot(\nabla_h\times\mathbf{F}_h) = \frac{1}{a\cos\phi}\left[ \frac{\partial F_\phi}{\partial\lambda} - \frac{\partial (F_\lambda\cos\phi)}{\partial\phi} \right],
+\]
+used in the $\psi$ Poisson equation (Section~\ref{sec:psi}).
+
+\subsection{Grid}\label{sec:gridcells}
+The grid is an Arakawa C-grid with $90 \times 40 \times 15$ tracer cells, indexed $(i,j,k)$ with $i = 1,\dots,90$ (east), $j = 1,\dots,40$ (north) and $k = 1,\dots,15$, where $k = 1$ is the \emph{bottom} level and $k = 15$ the \emph{surface} level.
+\begin{itemize}
+\item Tracer points are at longitude $\lambda_i = 2^\circ + 4^\circ(i-1)$ and latitude $\phi_j = -78^\circ + 4^\circ(j-1)$.
+\item $u_{i,j,k}$ lives on the \emph{east} face of cell $(i,j,k)$, at $\lambda_i + 2^\circ$.
+\item $v_{i,j,k}$ lives on the \emph{north} face, at latitude $\phi^v_j = \phi_j + 2^\circ$.
+\item $w_{i,j,k}$ lives on the \emph{top} face.
+\end{itemize}
+The horizontal spacings are uniform: $\Delta x = \Delta y = 4^\circ \times \pi a / 180^\circ \approx 444.7$~km, with $a = 6370$~km.
+The metric factors are $c_j = \cos\phi_j$ (at tracer points) and $c^v_j = \cos\phi^v_j$ (at $v$ points).
+The cell thicknesses $\Delta z_k$, from bottom to surface, are 690, 640, 590, 540, 490, 440, 390, 340, 290, 240, 190, 140, 100, 70 and 50~m.
+The vertical tracer points are not at the centres of the cells: they are placed so that the face between levels $k$ and $k+1$ lies exactly halfway between the tracer points of those two levels.
+As a result, the simple averages $\tfrac12(T_k + T_{k+1})$ below are exact linear interpolations to the face.
+From bottom to surface the tracer points are at $z_k = -4855$, $-4165$, $-3575$, $-2985$, $-2495$, $-2005$, $-1615$, $-1225$, $-935$, $-645$, $-455$, $-265$, $-175$, $-65$ and $-35$~m, and the top faces of the cells at $z^w_k = -4510$, $-3870$, $-3280$, $-2740$, $-2250$, $-1810$, $-1420$, $-1080$, $-790$, $-550$, $-360$, $-220$, $-120$, $-50$ and $0$~m.
+The pressure used in the equation of state is $|z_k|$~dbar.
+Because the horizontal spacing is uniform, the distance between neighbouring velocity points equals the distance between neighbouring tracer points, and both are written $\Delta x$, $\Delta y$.
+
+\subsection{Masks}\label{sec:masks}
+$m_{i,j,k} = 1$ for an ocean cell and $0$ for land.
+Each column is ocean from its bottom level $k_b(i,j)$ up to the surface; there are no partial cells.
+A face is open only if the cells on both sides are ocean:
+\[
+m^u_{i,j,k} = m_{i,j,k}\, m_{i+1,j,k}, \qquad
+m^v_{i,j,k} = m_{i,j,k}\, m_{i,j+1,k}, \qquad
+m^w_{i,j,k} = m_{i,j,k}\, m_{i,j,k+1}.
+\]
+The masks are fixed in time, so the sparsity pattern of the advection matrix is fixed.
+Of the $54{,}000$ cells, $28{,}497$ are ocean, in $2319$ columns.
+Veros's own array for the top faces, \texttt{maskW}, equals $m^w$ for $k \le 14$ but is $m_{i,j,15}$ (not zero) at the surface; it is used for quantities that live on the top faces ($N^2$, $e$, $E$ and the coefficients diagnosed from them, Section~\ref{sec:closures}), which exist at the surface too. Where the distinction matters it is written $\hat m^w$.
+
+\section{Temperature}\label{sec:temperature}
+
+\subsection{Prognostic equation (continuous form)}\label{sec:prognostic}
+
+The temperature $T$ (potential temperature, $^\circ$C) obeys
+\begin{equation}
+\frac{\partial T}{\partial t}
+= \underbrace{-\nabla \cdot \left( \mathbf{u}\, T \right)}_{\text{advection}}
+\; + \; \underbrace{\nabla \cdot \left( \mathsf{K}_\text{Redi} \nabla T \right)}_{\text{isoneutral diffusion}}
+\; + \; \underbrace{\nabla \cdot \left( \mathsf{K}_\text{skew} \nabla T \right)}_{\text{GM eddy advection}}
+\; + \; \underbrace{\frac{\partial}{\partial z} \left( \kappa_H \frac{\partial T}{\partial z} \right)}_{\text{vertical mixing}}
+\label{eq:T}
+\end{equation}
+on a sphere, with coordinates, metric factors and the operators $\nabla$ and $\nabla\cdot$ defined in Section~\ref{sec:coords}, and $\nabla\cdot\mathbf{u} = 0$.
+There are no interior sources or sinks, no explicit horizontal Laplacian or biharmonic diffusion, and no restoring zones.
+Salinity $S$ obeys the same equation with zero surface flux; it enters the temperature equation only through the density, and so through the isoneutral slopes.
+In this setup the salinity is uniform and stays uniform (Section~\ref{sec:salinity}), so the density is a function of temperature and pressure only.
+
+\subsubsection*{Advection}
+$\mathbf{u} = (u, v, w)$ is the resolved (model) velocity. The advective flux is non-dissipative (centred, second order); there is no flux limiter.
+
+\subsubsection*{Isoneutral slopes and taper}
+The isoneutral slopes are computed from the locally referenced density gradient,
+\[
+S_x = -\frac{\rho_T\, \partial_x T + \rho_S\, \partial_x S}{\min\!\left(0,\; \rho_T\, \partial_z T + \rho_S\, \partial_z S\right) - \epsilon},
+\qquad
+S_y = -\frac{\rho_T\, \partial_y T + \rho_S\, \partial_y S}{\min\!\left(0,\; \rho_T\, \partial_z T + \rho_S\, \partial_z S\right) - \epsilon},
+\]
+where $\rho_T = \partial\rho/\partial T$ and $\rho_S = \partial\rho/\partial S$ come from the TEOS-10 equation of state \citep{teos10} at the local pressure. $\epsilon = 10^{-20}~\text{kg}\,\text{m}^{-4}$ (the same units as the denominator) guards against division by zero.
+The minimum with zero means that statically unstable columns are treated as having (near) infinite slope, which the taper then removes.
+Slopes are tapered by
+\[
+f(S) = \tfrac{1}{2}\left[ 1 + \tanh\!\left( \frac{10^{-3} - |S|}{4\times 10^{-3}} \right) \right],
+\qquad f_x = f(S_x), \quad f_y = f(S_y).
+\]
+Note that $0 < f \le f(0) \approx 0.62$, so the taper reduces every slope-dependent term by at least 38\%, even where the isoneutral surfaces are flat.
+
+\subsubsection*{Isoneutral (Redi) diffusion tensor}
+The small-slope approximation of the Redi tensor \citep{redi1982} is used, with tapering:
+\[
+\mathsf{K}_\text{Redi} = K_\text{iso}
+\begin{pmatrix}
+1 & 0 & f_x S_x \\
+0 & 1 & f_y S_y \\
+f_x S_x & f_y S_y & f_x S_x^2 + f_y S_y^2
+\end{pmatrix},
+\qquad K_\text{iso} = 1000~\text{m}^2\,\text{s}^{-1}.
+\]
+In the time stepping, the $K_{33}$ entry is treated implicitly and the rest explicitly.
+
+\subsubsection*{Gent--McWilliams skew diffusion}
+The eddy-induced (bolus) advection \citep{gentmcwilliams1990} is written as an antisymmetric skew-diffusion tensor \citep{gent1995},
+\[
+\mathsf{K}_\text{skew} = K_\text{gm}
+\begin{pmatrix}
+0 & 0 & -f_x S_x \\
+0 & 0 & -f_y S_y \\
+f_x S_x & f_y S_y & 0
+\end{pmatrix}.
+\]
+The thickness diffusivity $K_\text{gm}(x,y,z,t)$ is set by the prognostic eddy kinetic energy $E$ ($\text{m}^2\,\text{s}^{-2}$):
+\[
+K_\text{gm} = \min\!\left( 10^4~\text{m}^2\,\text{s}^{-1},\; 0.4\, L \sqrt{E} \right),
+\qquad
+L = \max\!\left( 100~\text{m},\; \min\!\left( 2 L_\text{Ro},\; L_\text{Rh} \right) \right),
+\]
+\[
+L_\text{Ro} = \min\!\left( \frac{c}{|f_\text{cor}|},\; \sqrt{\frac{c}{2\beta}} \right),
+\qquad
+c = \frac{1}{\pi} \int_{-H}^{0} \sqrt{\max(0, N^2)}\, dz,
+\qquad
+L_\text{Rh} = \sqrt{\frac{\sqrt{E}}{\beta}},
+\]
+where $f_\text{cor} = 2\Omega\sin\phi$ ($\Omega$ Earth's rotation rate, $\text{rad}\,\text{s}^{-1}$), $\beta = \partial f_\text{cor}/\partial y$, $N^2$ ($\text{s}^{-2}$) is the buoyancy frequency squared and $H$ ($\text{m}$) the local depth.
+$E$ obeys its own prognostic equation (Section~\ref{sec:eke}).
+The discrete forms of $K_\text{gm}$, $N^2$ and the limits applied to them are in Section~\ref{sec:coefficients}.
+
+The same eddy effect is also applied to momentum as vertical friction (the TEM formulation, Section~\ref{sec:uvw}), so GM acts both on the tracers through $\mathsf{K}_\text{skew}$ and on the momentum equation.
+
+\subsubsection*{Vertical diffusivity}
+$\kappa_H(x,y,z,t)$ comes from the turbulent kinetic energy closure, with $e$ ($\text{m}^2\,\text{s}^{-2}$) the prognostic TKE:
+\[
+\kappa_H = \max\!\left( \frac{\kappa_M}{\text{Pr}},\; \kappa_\text{BL}(z) \right),
+\qquad
+\kappa_M = \min\!\left( 100~\text{m}^2\,\text{s}^{-1},\; 0.1\, \ell \sqrt{e} \right),
+\]
+\[
+\text{Pr} = \max\!\left( 1,\; \min\!\left( 10,\; 6.6\, \text{Ri} \right) \right),
+\qquad
+\text{Ri} = \frac{N^2 \kappa_M}{\varepsilon_v},
+\]
+where $\varepsilon_v$ ($\text{m}^2\,\text{s}^{-3}$) is the dissipation of mean kinetic energy by vertical friction (approximately $\kappa_M |\partial_z \mathbf{u}_h|^2$, so $\text{Ri} \approx N^2 / |\partial_z \mathbf{u}_h|^2$).
+The mixing length is $\ell = \sqrt{2}\sqrt{e}/N$, limited so that it changes by no more than the grid spacing between neighbouring levels ($|\partial \ell/\partial z| \le 1$, starting from zero at the sea floor and from the thickness of the top cell at the surface) and bounded below by $10^{-8}$~m.
+Where the column is statically unstable ($N^2 \le 0$), $N^2$ is replaced by $10^{-12}~\text{s}^{-2}$, so $\ell$ is set by these limits alone and $\kappa_M$ and $\kappa_H$ become large: this is how the closure represents convection.
+The $\kappa_M$ above is the one that sets $\kappa_H$ and $\text{Ri}$; the viscosity that acts on momentum is $\max(2\times10^{-4}~\text{m}^2\,\text{s}^{-1}, \kappa_M)$, and in the 200-year state that lower bound is the value on 73\% of the faces.
+The exact discrete procedure is in Section~\ref{sec:coefficients}.
+The Bryan--Lewis background profile \citep{bryanlewis1979} is
+\[
+\kappa_\text{BL}(z) = \left[ 0.8 + \frac{1.05}{\pi} \arctan\!\left( \frac{-z - 2500~\text{m}}{222.2~\text{m}} \right) \right] \times 10^{-4}~\text{m}^2\,\text{s}^{-1}.
+\]
+$\kappa_\text{BL} \ge 2.75\times10^{-5}~\text{m}^2\,\text{s}^{-1}$ everywhere, so the model's separate minimum diffusivity ($2\times10^{-5}~\text{m}^2\,\text{s}^{-1}$) never takes effect and has been omitted.
+
+\subsubsection*{Boundary conditions}
+There is no flux of $T$ through the sides or the bottom. At the surface,
+\[
+\kappa_H \frac{\partial T}{\partial z}\bigg|_{z=0} = Q_T,
+\qquad
+Q_T = \frac{Q_\text{net} + Q_\text{nec}\left( T_\text{clim} - T_\text{top} \right)}{c_{p,0}\, \rho_0},
+\]
+except that $Q_T = 0$ wherever $T_\text{top} < -1.8~^\circ$C and $Q_T < 0$ (a simple ice mask, which stops further cooling below freezing).
+$T_\text{top}$ is the temperature of the top grid cell (50~m thick).
+The $Q_\text{nec}$ term relaxes the surface temperature towards climatology with timescale $\rho_0 c_{p,0}\, \Delta z_\text{top} / Q_\text{nec}$.
+
+\subsubsection*{Constants and fields}
+\begin{center}
+\small
+\begin{tabular}{lll}
+\hline
+Symbol & Type & Value / source \\
+\hline
+$\rho_0$ & scalar & $1024~\text{kg}\,\text{m}^{-3}$ \\
+$c_{p,0}$ & scalar & $3991.86795711963~\text{J}\,\text{kg}^{-1}\,\text{K}^{-1}$ \\
+$K_\text{iso}$ & scalar & $1000~\text{m}^2\,\text{s}^{-1}$ \\
+Ice threshold & scalar & $-1.8~^\circ$C \\
+$g$ & scalar & $9.81~\text{m}\,\text{s}^{-2}$ \\
+$\Omega$ & scalar & $\pi/43082~\text{s}^{-1} = 7.2921\times10^{-5}~\text{s}^{-1}$ \\
+$a$ & scalar & $6370$~km \\
+$Q_\text{net}(x,y)$ & 2D field, constant in time & annual-mean net surface heat flux (W\,m$^{-2}$), positive into the \\
+ & & ocean, minus its area mean over the whole $90\times40$ grid \\
+ & & (land points included, taken before the land mask is applied) \\
+$\boldsymbol\tau(x,y)$ & 2D field, constant in time & annual-mean wind stress (N\,m$^{-2}$), Section~\ref{sec:momentum} \\
+$Q_\text{nec}(x,y)$ & 2D field, constant in time & time mean of ECMWF $\partial Q/\partial T$ coefficient (W\,m$^{-2}$\,K$^{-1}$) \\
+$T_\text{clim}(x,y)$ & 2D field, constant in time & annual-mean climatological SST \\
+$f_x$, $f_y$, $S_x$, $S_y$ & 3D fields, time varying & from $T$, $S$ via the equation of state \\
+$K_\text{gm}$ & 3D field, time varying & from EKE closure \\
+$\kappa_H$ & 3D field, time varying & from TKE closure \\
+$\mathbf{u}$ & 3D field, time varying & resolved velocity \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Spatial discretisation of the advection term}\label{sec:advection}
+
+The grid, the masks and the operators $\nabla$ and $\nabla\cdot$ are those of Section~\ref{sec:grid}.
+
+\subsubsection*{Fluxes}
+The scheme is the second-order centred flux form.
+The fluxes through the east, north and top faces of cell $(i,j,k)$ are
+\begin{align*}
+F^x_{i,j,k} &= m^u_{i,j,k}\; u_{i,j,k}\; \tfrac12\left( T_{i,j,k} + T_{i+1,j,k} \right), \\
+F^y_{i,j,k} &= m^v_{i,j,k}\; c^v_j\, v_{i,j,k}\; \tfrac12\left( T_{i,j,k} + T_{i,j+1,k} \right), \\
+F^z_{i,j,k} &= m^w_{i,j,k}\; w_{i,j,k}\; \tfrac12\left( T_{i,j,k} + T_{i,j,k+1} \right), \qquad k = 1,\dots,14.
+\end{align*}
+The advective tendency of cell $(i,j,k)$ is
+\begin{equation}
+A_{i,j,k} = -m_{i,j,k} \left[
+\frac{F^x_{i,j,k} - F^x_{i-1,j,k}}{c_j\, \Delta x}
++ \frac{F^y_{i,j,k} - F^y_{i,j-1,k}}{c_j\, \Delta y}
++ \frac{F^z_{i,j,k} - F^z_{i,j,k-1}}{\Delta z_k}
+\right].
+\label{eq:adv_discrete}
+\end{equation}
+
+\subsubsection*{Matrix coefficients}
+Writing $A_{i,j,k} = \sum M_{(i,j,k),(i',j',k')}\, T_{i',j',k'}$, row $(i,j,k)$ of $M$ for an ocean cell has at most six non-zero entries:
+\begin{center}
+\begin{tabular}{ll}
+\hline
+Column & Coefficient \\
+\hline
+$T_{i+1,j,k}$ (east) & $-\dfrac{m^u_{i,j,k}\, u_{i,j,k}}{2 c_j \Delta x}$ \\[2ex]
+$T_{i-1,j,k}$ (west) & $+\dfrac{m^u_{i-1,j,k}\, u_{i-1,j,k}}{2 c_j \Delta x}$ \\[2ex]
+$T_{i,j+1,k}$ (north) & $-\dfrac{m^v_{i,j,k}\, c^v_j\, v_{i,j,k}}{2 c_j \Delta y}$ \\[2ex]
+$T_{i,j-1,k}$ (south) & $+\dfrac{m^v_{i,j-1,k}\, c^v_{j-1}\, v_{i,j-1,k}}{2 c_j \Delta y}$ \\[2ex]
+$T_{i,j,k+1}$ (above) & $-\dfrac{m^w_{i,j,k}\, w_{i,j,k}}{2 \Delta z_k}$ \\[2ex]
+$T_{i,j,k-1}$ (below) & $+\dfrac{m^w_{i,j,k-1}\, w_{i,j,k-1}}{2 \Delta z_k}$ \\[1ex]
+\hline
+\end{tabular}
+\end{center}
+Rows for land cells ($m_{i,j,k} = 0$) are zero, so $M$ can be restricted to ocean cells.
+
+\paragraph{Zero diagonal.}
+The diagonal entry of $M$ is $-\tfrac12 D_{i,j,k}$, where $D$ is the discrete divergence of the masked velocity (with zero flux through the surface).
+For the velocities computed by this setup, $D = 0$, so the diagonal is zero:
+\begin{itemize}
+\item $w$ is diagnosed from $u$ and $v$ by integrating exactly this discrete continuity equation up from the bottom, starting from $w = 0$ below the bottom cell.
+This makes $D = 0$ in every cell below the surface.
+\item In the surface cell, $D_{i,j,15} = -w_{i,j,15}/\Delta z_{15}$, where $w_{i,j,15}$ is the diagnosed vertical velocity at the surface.
+The rigid lid makes the depth-integrated flow non-divergent, so $w_{i,j,15} = 0$ to rounding error.
+\end{itemize}
+For the saved model state, $|D| \le 10^{-18}~\text{s}^{-1}$, compared with $|u|/\Delta x \sim 4\times10^{-7}~\text{s}^{-1}$: a relative size of about $10^{-12}$.
+
+This holds only if $u$, $v$ and $w$ come from the same model time level, or are averaged together in the same way.
+$w$ is not included in the time-averaged output, so if $u$ and $v$ are taken from the averages, $w$ must be recomputed from them with the discrete continuity equation above.
+
+\subsubsection*{Boundaries}
+All boundaries are handled by \eqref{eq:adv_discrete} with the flux through the boundary face set to zero.
+The interior formula therefore applies everywhere, with the following substitutions:
+\begin{itemize}
+\item \textbf{East--west (periodic):} the domain is periodic in longitude.
+Cell $i = 1$ has west neighbour $i = 90$, and cell $i = 90$ has east neighbour $i = 1$, so $F^x_{0,j,k} \equiv F^x_{90,j,k}$ and $T_{91,j,k} \equiv T_{1,j,k}$.
+There is no zonal boundary.
+\item \textbf{Southern edge ($j = 1$):} the row south of $j = 1$ is land, so $F^y_{i,0,k} = 0$:
+\[
+A_{i,1,k} = -m_{i,1,k}\left[ \frac{F^x_{i,1,k} - F^x_{i-1,1,k}}{c_1 \Delta x} + \frac{F^y_{i,1,k}}{c_1 \Delta y} + \frac{F^z_{i,1,k} - F^z_{i,1,k-1}}{\Delta z_k} \right].
+\]
+\item \textbf{Northern edge ($j = 40$):} the row north of $j = 40$ is land, so $F^y_{i,40,k} = 0$:
+\[
+A_{i,40,k} = -m_{i,40,k}\left[ \frac{F^x_{i,40,k} - F^x_{i-1,40,k}}{c_{40} \Delta x} - \frac{F^y_{i,39,k}}{c_{40} \Delta y} + \frac{F^z_{i,40,k} - F^z_{i,40,k-1}}{\Delta z_k} \right].
+\]
+\item \textbf{Surface ($k = 15$):} there is no advective flux through the surface, $F^z_{i,j,15} = 0$:
+\[
+A_{i,j,15} = -m_{i,j,15}\left[ \frac{F^x_{i,j,15} - F^x_{i-1,j,15}}{c_j \Delta x} + \frac{F^y_{i,j,15} - F^y_{i,j-1,15}}{c_j \Delta y} - \frac{F^z_{i,j,14}}{\Delta z_{15}} \right].
+\]
+\item \textbf{Sea floor ($k = k_b(i,j)$, the lowest ocean cell in the column):} there is no flux through the bottom face, $F^z_{i,j,k_b-1} = 0$.
+This happens either because $k_b = 1$ (bottom of the model domain) or because the cell below is land, so $m^w_{i,j,k_b-1} = 0$:
+\[
+A_{i,j,k_b} = -m_{i,j,k_b}\left[ \frac{F^x_{i,j,k_b} - F^x_{i-1,j,k_b}}{c_j \Delta x} + \frac{F^y_{i,j,k_b} - F^y_{i,j-1,k_b}}{c_j \Delta y} + \frac{F^z_{i,j,k_b}}{\Delta z_{k_b}} \right].
+\]
+\item \textbf{Coastlines and side walls of topography:} if a horizontal neighbour is land, the corresponding face mask ($m^u$ or $m^v$) is zero, so that face's flux is zero.
+For example, with land to the east, $F^x_{i,j,k} = 0$.
+\end{itemize}
+A cell can be on several boundaries at once (for example a surface cell next to a coast).
+The flux through each boundary face is then zero, and the corresponding matrix coefficients in the table above vanish through the masks.
+
+\subsubsection*{Time stepping}
+Advection is stepped with Adams--Bashforth 2:
+\begin{equation}
+T' = T^n + \Delta t \left[ (1.5+\epsilon_\text{AB})\, \mathsf{M}\, T^n - (0.5+\epsilon_\text{AB})\, \mathsf{M}_{n-1}T^{n-1} \right], \qquad \epsilon_\text{AB} = 0.1,
+\label{eq:ab2}
+\end{equation}
+where $T'$ is the temperature carried forward into isoneutral diffusion (Sections~\ref{sec:iso}, \ref{sec:gm}) and vertical mixing (Section~\ref{sec:vmix}), and $\mathsf{M}_{n-1}T^{n-1}$ is the advection tendency from the previous time step, carried over rather than recomputed (it depends on the previous step's velocities, not on $\mathsf{M}$).
+
+\subsection{Spatial discretisation of the vertical mixing term}\label{sec:vmix}
+
+The grid, the masks $m$, $m^w$ and the bottom level $k_b(i,j)$ are those of Section~\ref{sec:grid}.
+Vertical mixing acts within each water column only, so it couples a cell to the cells directly above and below it and to nothing else.
+Matrices are written in sans-serif type ($\mathsf{D}$, $\mathsf{R}$, $\mathsf{V}$), so the diffusion matrix $\mathsf{D}$ should not be confused with the divergence $D_{i,j,k}$ of the previous subsection.
+
+\subsubsection*{Vertical grid}
+$\kappa_{i,j,k}$ is the vertical diffusivity on the \emph{top} face of cell $(i,j,k)$, at the same place as $w_{i,j,k}$.
+The vertical gradient on that face is taken over the distance between neighbouring tracer points, $\Delta z^w_k = z_{k+1} - z_k$, which from bottom to surface ($k = 1,\dots,14$) is
+690, 590, 590, 490, 490, 390, 390, 290, 290, 190, 190, 90, 110 and 30~m.
+These differ from the averages of neighbouring cell thicknesses because of how the tracer points are placed (the faces are midway between them, not the other way round).
+The top tracer point is at $z_{15} = -35$~m, in a top cell that spans $-50$~m to $0$~m.
+
+\subsubsection*{Fluxes}
+The diffusive flux through the top face of cell $(i,j,k)$ (positive when it carries temperature downwards, into cell $k$) is
+\[
+G_{i,j,k} = m^w_{i,j,k}\; \kappa_{i,j,k}\; \frac{T_{i,j,k+1} - T_{i,j,k}}{\Delta z^w_k}, \qquad k = 1,\dots,14,
+\]
+and the surface flux $Q_{T,i,j}$ (positive into the ocean, K\,m\,s$^{-1}$) replaces the diffusive flux through the top face of the surface cell:
+\[
+Q_{T,i,j} = a_{i,j}\; \frac{Q_{\text{net},i,j} + Q_{\text{nec},i,j}\left( T_{\text{clim},i,j} - T_{i,j,15} \right)}{\rho_0\, c_{p,0}},
+\qquad
+a_{i,j} = m_{i,j,15}\left( 1 - I_{i,j} \right).
+\]
+$I_{i,j} = 1$ marks an ice-masked column (see below) and is $0$ otherwise.
+The vertical mixing tendency of cell $(i,j,k)$ is
+\begin{equation}
+V_{i,j,k} = m_{i,j,k} \left[ \frac{G_{i,j,k} - G_{i,j,k-1}}{\Delta z_k} + \delta_{k,15}\, \frac{Q_{T,i,j}}{\Delta z_{15}} \right],
+\label{eq:vmix_discrete}
+\end{equation}
+with $G_{i,j,15} = 0$ (the surface face carries only $Q_T$) and $G_{i,j,0} = 0$.
+
+\subsubsection*{Ice mask}
+The surface flux is switched off where the surface is below freezing and the flux would cool it further:
+\[
+I_{i,j} = 1 \quad \text{if} \quad T^\ast_{i,j,15} < -1.8~^\circ\text{C} \quad \text{and} \quad Q_{\text{net},i,j} + Q_{\text{nec},i,j}\left( T_{\text{clim},i,j} - T^\ast_{i,j,15} \right) < 0,
+\]
+where $T^\ast$ is a given temperature field.
+$I$ makes the term non-linear in $T$, but for a fixed $I$ (that is, a fixed $T^\ast$) the term is affine in $T$.
+In the saved model states no column is ice masked; with a surface 3~K colder than the model state, two or three are.
+
+\subsubsection*{Matrix form}
+For a fixed diffusivity $\kappa$ and a fixed ice mask $I$,
+\[
+V = \mathsf{V}\, T + \mathbf{b}, \qquad \mathsf{V} = \mathsf{D} + \mathsf{R},
+\]
+where $\mathsf{D}$ (vertical diffusion) depends only on $\kappa$, $\mathsf{R}$ (surface relaxation) is diagonal and depends only on $I$, and the constant vector $\mathbf{b}$ also depends only on $I$.
+Row $(i,j,k)$ of $\mathsf{V}$ for an ocean cell has at most three non-zero entries:
+\begin{center}
+\begin{tabular}{ll}
+\hline
+Column & Coefficient \\
+\hline
+$T_{i,j,k+1}$ (above) & $\mathsf{D}^+_{i,j,k} = \dfrac{m^w_{i,j,k}\, \kappa_{i,j,k}}{\Delta z^w_k\, \Delta z_k}$ \\[2.5ex]
+$T_{i,j,k-1}$ (below) & $\mathsf{D}^-_{i,j,k} = \dfrac{m^w_{i,j,k-1}\, \kappa_{i,j,k-1}}{\Delta z^w_{k-1}\, \Delta z_k}$ \\[2.5ex]
+$T_{i,j,k}$ (diagonal) & $-\mathsf{D}^+_{i,j,k} - \mathsf{D}^-_{i,j,k} \;-\; \delta_{k,15}\, \dfrac{a_{i,j}\, Q_{\text{nec},i,j}}{\rho_0\, c_{p,0}\, \Delta z_{15}}$ \\[2ex]
+\hline
+\end{tabular}
+\end{center}
+The last part of the diagonal is $\mathsf{R}$; the rest is $\mathsf{D}$.
+The constant vector is non-zero only in the surface cells:
+\[
+b_{i,j,k} = \delta_{k,15}\, \frac{a_{i,j} \left( Q_{\text{net},i,j} + Q_{\text{nec},i,j}\, T_{\text{clim},i,j} \right)}{\rho_0\, c_{p,0}\, \Delta z_{15}}.
+\]
+Rows and columns for land cells are zero.
+
+$Q_\text{nec} \ge 0$ everywhere (it is $0$ in four surface ocean cells and at most $58.5~\text{W}\,\text{m}^{-2}\,\text{K}^{-1}$), so $\mathsf{R}$ always damps the surface temperature towards $T_\text{clim}$, with a timescale of at least $\rho_0 c_{p,0} \Delta z_{15} / \max Q_\text{nec} \approx 40$~days.
+
+\subsubsection*{Boundaries}
+All boundaries are handled by \eqref{eq:vmix_discrete} with the diffusive flux through the boundary face set to zero.
+\begin{itemize}
+\item \textbf{Surface ($k = 15$):} $G_{i,j,15} = 0$ and the surface flux enters instead:
+\[
+V_{i,j,15} = m_{i,j,15}\left[ -\frac{G_{i,j,14}}{\Delta z_{15}} + \frac{Q_{T,i,j}}{\Delta z_{15}} \right].
+\]
+\item \textbf{Sea floor ($k = k_b$):} no flux through the bottom face, $G_{i,j,k_b-1} = 0$ (because $k_b = 1$ or because $m^w_{i,j,k_b-1} = 0$):
+\[
+V_{i,j,k_b} = m_{i,j,k_b}\, \frac{G_{i,j,k_b}}{\Delta z_{k_b}}.
+\]
+\item \textbf{One-cell columns ($k_b = 15$):} both apply, so only the surface flux acts: $V_{i,j,15} = m_{i,j,15}\, Q_{T,i,j} / \Delta z_{15}$.
+\item \textbf{Lateral boundaries:} the term has no horizontal coupling, so the periodic east--west boundary, the northern and southern walls and coastlines have no effect.
+\end{itemize}
+
+\subsubsection*{Properties}
+\begin{itemize}
+\item $\mathsf{D}$ conserves heat: each of its columns, weighted by the cell thicknesses, sums to zero, so $\sum \Delta z_k\, (\mathsf{D}T)_{i,j,k} = 0$ in every column.
+Only $\mathsf{R}$ and $\mathbf{b}$ change the total heat content.
+\item $\mathsf{D}$ is not constant in time: $\kappa$ is diagnosed at every step from the TKE closure (it depends on $e$, $N^2$ and $\varepsilon_v$).
+Where the water column is statically unstable, $\kappa$ reaches $100~\text{m}^2\,\text{s}^{-1}$, so the largest entries of $\mathsf{D}$ are around $100/(30 \times 50)~\text{s}^{-1} \approx 0.07~\text{s}^{-1}$.
+This is far larger than $1/\Delta t = 1.2\times10^{-5}~\text{s}^{-1}$ (the problem is stiff), which is why $\mathsf{D}$ is treated implicitly.
+\item \textbf{Time stepping.} $\mathsf{D}$ is implicit; the surface flux ($\mathsf{R}$ and $\mathbf{b}$, and the ice mask) is explicit, evaluated at the current time level $n$:
+\[
+\left( \mathsf{I} - \Delta t\, \mathsf{D} \right) T^{n+1} = T''' + \Delta t \left( \mathsf{R}\, T^n + \mathbf{b} \right),
+\]
+where $T'''$ is the temperature after advection~\eqref{eq:ab2}, isoneutral diffusion (Section~\ref{sec:iso}) and GM eddy advection (Section~\ref{sec:gm}), and $I$ is computed from $T^\ast = T^n$.
+\end{itemize}
+
+\subsection{Spatial discretisation of the isoneutral diffusion term}\label{sec:iso}
+
+This is the Redi term of equation~\eqref{eq:T}, $\nabla\cdot(\mathsf{K}_\text{Redi}\nabla T)$ -- not the GM eddy advection term (Section~\ref{sec:gm}), which shares the same slopes but uses $K_\text{gm}$ in place of $K_\text{iso}$.
+It is discretised with the triad scheme of Griffies et al.\ \citep{griffies1998}: each face gets four one-sided slope estimates (``triads''), each tapered and weighted by its own density gradient, rather than one slope per face.
+This makes $\mathsf{K}_\text{Redi}$ depend on $T$ and $S$ non-linearly (through the slopes and the taper), but for \emph{fixed} $T$, $S$ the term is linear in whichever tracer it is applied to -- exactly as a fixed $\kappa_H$ makes the vertical mixing term above linear.
+$K_\text{iso} = 1000~\text{m}^2\,\text{s}^{-1}$ is a true constant here (Section~\ref{sec:prognostic}), so all of the state-dependence is in the slopes and the taper.
+
+\subsubsection*{Triads}
+At the east face of cell $(i,j,k)$, four triads (indexed by $k_r \in \{0,1\}$, the vertical neighbour used, and $i_p \in \{0,1\}$, the column whose density gradient is used) each give a slope
+\[
+S^e_{i,j,k,i_p,k_r} = -\frac{\rho_{T,i+i_p,j,k}\,\partial_x T|_{i,j,k} + \rho_{S,i+i_p,j,k}\,\partial_x S|_{i,j,k}}{\min(0,\, \rho_{T,i+i_p,j,k}\,\partial_z T|_{k'} + \rho_{S,i+i_p,j,k}\,\partial_z S|_{k'}) - \epsilon},
+\]
+where $\partial_z T|_{k'} = (T_{i+i_p,j,k'+1}-T_{i+i_p,j,k'})/\Delta z^w_{k'}$ is the one-sided vertical difference used by this triad: $k' = k-1$ for the ``lower'' triad ($k_r=0$) and $k'=k$ for the ``upper'' triad ($k_r=1$), while the density coefficients $\rho_T$, $\rho_S$ and the horizontal gradient $\partial_x T$, $\partial_x S$ are always at the cell's own level $k$.
+This is tapered to $A^e_{i,j,k,i_p,k_r} = f(S^e_{i,j,k,i_p,k_r})\,S^e_{i,j,k,i_p,k_r}$ (zero where either neighbouring cell is land, or above the surface for the $k_r=1$ triad).
+$A^n_{i,j,k,j_p,k_r}$ (north face) is the same with $y$ in place of $x$.
+At the top face of cell $(i,j,k)$ (between levels $k$ and $k+1$), two further sets of triads give the slopes seen looking east ($A^{bx}_{i,j,k,i_p,k_r}$) and north ($A^{by}_{i,j,k,j_p,k_r}$): here it is $\rho_T$, $\rho_S$ and the horizontal gradient that move to level $k+k_r$, divided by the (fixed) vertical gradient across the face itself.
+$K_{11}$ and $K_{22}$, the horizontal diagonal entries of $\mathsf{K}_\text{Redi}$ on the east and north faces, are sums of $\max(K_\text{steep}, K_\text{iso}f)$ over the four triads, each weighted by the $\Delta z^w$ of its vertical difference and divided by $4\Delta z_k$:
+\[
+K_{11,i,j,k} = \frac{m^u_{i,j,k}}{4\Delta z_k}\sum_{i_p,k_r} \Delta z^w_{k-1+k_r}\, \max\!\left(K_\text{steep},\, K_\text{iso}\, f(S^e_{i,j,k,i_p,k_r})\right),
+\]
+with $\Delta z^w_{15} = 70$~m, and the $k_r = 0$ triads absent at $k=1$ (there is no level below); $K_{22}$ is the same with $m^v$ and the north-face triads.
+Since $K_\text{steep}=K_\text{iso}=1000~\text{m}^2\,\text{s}^{-1}$ here, the maximum always equals $1000$, and because $\Delta z_k = \tfrac12(\Delta z^w_{k-1}+\Delta z^w_k)$ the result is exactly $K_{11}=K_{22}=1000~\text{m}^2\,\text{s}^{-1}$ on every open face of levels $k = 2,\dots,15$, and exactly $500~\text{m}^2\,\text{s}^{-1}$ on the open faces of the lowest model level $k=1$ (444 east faces and 412 north faces).
+The horizontal part of the Redi term is therefore not tapered: the taper reduces only the slope-dependent terms.
+$K_{33}$ (Section~\ref{sec:prognostic}'s $f_xS_x^2+f_yS_y^2$ term), on the top face of cell $(i,j,k)$, is the corresponding sum over the top-face triads, with $S^{bx}$, $S^{by}$ the untapered slopes of which $A^{bx} = f(S^{bx})S^{bx}$, $A^{by} = f(S^{by})S^{by}$ are the tapered form:
+\[
+K_{33,i,j,k} = \frac{K_\text{iso}\, m^w_{i,j,k}}{4}\left[ \sum_{i_p,k_r} f(S^{bx})\,(S^{bx})^2 + \sum_{j_p,k_r} \frac{c^v_{j+j_p-1}}{c_j}\, f(S^{by})\,(S^{by})^2 \right], \qquad k = 1,\dots,14 .
+\]
+
+\subsubsection*{Fluxes}
+The east, north and top face fluxes are, with $\displaystyle\sum_{i_p,k_r}$ short for $\sum_{i_p=0}^1\sum_{k_r=0}^1$ (similarly for $j_p$),
+\begin{align*}
+F^x_{i,j,k} &= \frac{K_{11,i,j,k}}{c_j\Delta x}(T_{i+1,j,k}-T_{i,j,k}) + \frac{K_\text{iso}}{4\Delta z_k}\sum_{i_p,k_r} A^e_{i,j,k,i_p,k_r}\left(T_{i+i_p,j,k+k_r} - T_{i+i_p,j,k+k_r-1}\right), \\
+F^y_{i,j,k} &= \frac{c^v_j K_{22,i,j,k}}{\Delta y}(T_{i,j+1,k}-T_{i,j,k}) + \frac{c^v_j K_\text{iso}}{4\Delta z_k}\sum_{j_p,k_r} A^n_{i,j,k,j_p,k_r}\left(T_{i,j+j_p,k+k_r} - T_{i,j+j_p,k+k_r-1}\right), \\
+F^z_{i,j,k} &= \frac{K_\text{iso}}{4c_j\Delta x}\sum_{i_p,k_r} A^{bx}_{i,j,k,i_p,k_r}\left(T_{i+i_p,j,k+k_r} - T_{i+i_p-1,j,k+k_r}\right) \\
+&\quad + \frac{K_\text{iso}}{4\Delta y}\sum_{j_p,k_r} \frac{c^v_{j+j_p-1}}{c_j}A^{by}_{i,j,k,j_p,k_r}\left(T_{i,j+j_p,k+k_r} - T_{i,j+j_p-1,k+k_r}\right).
+\end{align*}
+The $k_r=0$ terms in the $F^x$, $F^y$ sums use $T_{\cdot,\cdot,k-1}$ and the $k_r=1$ terms use $T_{\cdot,\cdot,k+1}$; where that level is below the sea floor or above the surface the triad coefficient $A^e$ or $A^n$ is zero, so the term vanishes. $F^z_{i,j,k}$ is defined for $k=1,\dots,14$ only: $K_{33}$, not $F^z$, carries the rest of the vertical flux, and is treated implicitly below.
+
+\subsubsection*{Matrix form}
+The resulting tendency has the same form as advection's~\eqref{eq:adv_discrete}, with the opposite sign because these $F$ are minus the diffusive fluxes:
+\begin{equation}
+A_{i,j,k} = m_{i,j,k}\left[\frac{F^x_{i,j,k}-F^x_{i-1,j,k}}{c_j\Delta x} + \frac{F^y_{i,j,k}-F^y_{i,j-1,k}}{c_j\Delta y} + \frac{F^z_{i,j,k}-F^z_{i,j,k-1}}{\Delta z_k}\right],
+\label{eq:iso_discrete}
+\end{equation}
+giving
+\[
+A_{i,j,k} = \sum \mathsf{E}_{(i,j,k),(i',j',k')}\, T_{i',j',k'}.
+\]
+Row $(i,j,k)$ of the sparse matrix $\mathsf{E}$ has up to 15 non-zero entries: the cell itself and each of its 4 horizontal neighbours (east, west, north, south), each paired with all three of the levels $k-1$, $k$, $k+1$.
+Rows and columns for land cells are zero.
+$\mathsf{E}$ depends on $T$ and $S$ (through the triads) but is then linear in whichever tracer it multiplies: the same $\mathsf{E}$, built once from $T$ and $S$, is applied to both temperature and salinity.
+
+\subsubsection*{Implicit $K_{33}$}
+As for vertical mixing, $K_{33}$ is treated implicitly, with the same tridiagonal matrix $\mathsf{D}$ as Section~\ref{sec:vmix} (just built from $K_{33}$ in place of $\kappa_H$, with no surface or relaxation term: $\mathsf{D}_{33}=\mathsf{D}(K_{33})$).
+This term is stepped as
+\[
+\left( \mathsf{I} - \Delta t\,\mathsf{D}_{33} \right) T'' = T' + \Delta t\, \mathsf{E}\,T^n,
+\]
+where $T'$ is the temperature after advection~\eqref{eq:ab2}, and $\mathsf{E}$, $\mathsf{D}_{33}$ are both built from $T^n$, $S^n$.
+
+\subsubsection*{Boundaries}
+As for advection: a face's contribution vanishes wherever a mask factor in it is zero -- $m_{i,j,k}$ at land cells, the implicit triad masks at the sea floor and surface (via $A^e$, $A^n$ being forced to zero for the $k_r=1$ triad above the surface, and never assigned below the sea floor), and the east--west periodicity, closed north/south walls and coastlines exactly as before (no triad reaches past a masked face, since every triad's slope is built from a density gradient that is itself zero across a masked face).
+
+\subsubsection*{Properties}
+\begin{itemize}
+\item Like $\mathsf{D}$, $\mathsf{E}$ conserves heat: it is built entirely from face fluxes with no source term, so $\sum c_j\,\Delta x\,\Delta y\,\Delta z_k\, (\mathsf{E}T)_{i,j,k}$, weighted by the full cell volume (not $\Delta z_k$ alone, since $\mathsf{E}$ also couples horizontal neighbours), is zero summed over the whole ocean.
+\item The matrix depends on \emph{both} prognostic tracers ($T$ and $S$), through the locally referenced density gradient, not on $T$ alone as for vertical mixing's $\kappa_H$ or $\mathsf{R}$.
+\item $K_{11}=K_{22}=1000~\text{m}^2\,\text{s}^{-1}$ in this configuration makes the 5 same-level entries (the cell itself and its 4 horizontal neighbours) close to a plain, constant-coefficient horizontal Laplacian, plus a small triad correction; the other 10 entries, one level above or below those same horizontal positions, come entirely from the triads and carry the rest of the slope dependence (together with $K_{33}$).
+\end{itemize}
+
+\subsection{Spatial discretisation of the GM eddy advection term}\label{sec:gm}
+
+This is the GM eddy advection term of equation~\eqref{eq:T}, written there as the skew-diffusion divergence $\nabla\cdot(\mathsf{K}_\text{skew}\nabla T)$ (Section~\ref{sec:prognostic}).
+It reuses everything in Section~\ref{sec:iso} except $K_{11}$, $K_{22}$ and $K_{33}$: the same triads $A^e$, $A^n$, $A^{bx}$, $A^{by}$ (built once from $T$, $S$ and shared between the two terms), the same fluxes and divergence~\eqref{eq:iso_discrete}, and the same matrix form $A_{i,j,k}=\sum \mathsf{F}_{(i,j,k),(i',j',k')}T_{i',j',k'}$, giving a sparse matrix $\mathsf{F}$ with the same (up to 15-entry) sparsity pattern as $\mathsf{E}$.
+Three things differ, all because $\mathsf{K}_\text{skew}$ (Section~\ref{sec:prognostic}) has no diagonal and an antisymmetric off-diagonal with the opposite sign in its two non-zero corners:
+\begin{itemize}
+\item $K_{11}=K_{22}=0$ removes the local (first) term of $F^x$ and $F^y$, leaving only their triad contributions; $F^z$ never had a local term and is unaffected.
+\item $K_\text{iso}$ is replaced by $-K_\text{gm}$ in the $F^x$, $F^y$ triads and by $+K_\text{gm}$ in the $F^z$ triads (the opposite relative sign of the two faces is exactly the antisymmetry of $\mathsf{K}_\text{skew}$).
+\item There is no implicit piece: $\mathsf{K}_\text{skew}$ has no $(3,3)$ entry, so unlike $K_{33}$, $\mathsf{F}$ is stepped entirely explicitly, $T''' = T'' + \Delta t\,\mathsf{F}\,T^n$, where $T''$ is the temperature after the Redi update (Section~\ref{sec:iso}).
+\end{itemize}
+
+\subsubsection*{A subtlety invisible for the Redi term}
+$K_\text{gm}$ lives on the top faces of the cells (Section~\ref{sec:coefficients}), so the $F^z$ triads use $K_{\text{gm},i,j,k}$ as it is.
+The $F^x$, $F^y$ triad sums do not use $K_\text{iso}$ (or here, $-K_\text{gm}$) at one point, but its average over the four top-face points next to the east (north) face: the top and the bottom face of the two cells that share it,
+\[
+\bar K^e_{i,j,k} = \tfrac14\left( K_{\text{gm},i,j,k} + K_{\text{gm},i,j,k-1} + K_{\text{gm},i+1,j,k} + K_{\text{gm},i+1,j,k-1} \right), \quad k \ge 2,
+\qquad
+\bar K^e_{i,j,1} = \tfrac12\left( K_{\text{gm},i,j,1} + K_{\text{gm},i+1,j,1} \right),
+\]
+and likewise $\bar K^n$ with $j+1$ in place of $i+1$.
+$K_\text{gm}$ is zero on a face that lies on the sea floor (because $E$ is zero there), so in the lowest ocean cell of a column whose floor is above the bottom of the model the four-point average still applies, with two of its four values zero.
+For the Redi term this is invisible: $K_\text{iso}$ is a true constant (Section~\ref{sec:iso}), and the average of a constant is just that constant. $K_\text{gm}$ varies in $x$, $y$ and $z$, so here the average must be computed explicitly; using the unaveraged cell value in its place is a real error, here of order $10\%$.
+
+\subsubsection*{The thickness diffusivity $K_\text{gm}$}
+$K_\text{gm}$ is given in Section~\ref{sec:prognostic}; its ingredients are discretised as follows.
+The Coriolis parameter and its meridional gradient are grid quantities, fixed in time:
+\[
+f_{\text{cor},j} = 2\Omega\sin\phi_j,
+\qquad
+\beta_j = \tfrac{1}{2}\left[ \frac{f_{\text{cor},j+1}-f_{\text{cor},j}}{\Delta y} + \frac{f_{\text{cor},j}-f_{\text{cor},j-1}}{\Delta y} \right],
+\]
+a centred difference of $f_\text{cor}$ extended by one row beyond the domain on each side (the extra row needed for $\beta_1$, $\beta_{40}$ only ever multiplies a triad that is already zero at the closed north/south walls, so its exact value there does not matter).
+$c$ (Section~\ref{sec:prognostic}) is a discrete vertical sum,
+\[
+c_{i,j} = \frac{1}{\pi}\sum_{k=1}^{15} \sqrt{\max(0,N^2_{i,j,k})}\,\Delta z^w_k\, m^\text{col}_{i,j,k},
+\]
+using $\Delta z^w_{15}=70$~m (as for $K_{11}$ in Section~\ref{sec:iso}) and a column mask $m^\text{col}$ that equals $m_{i,j,15}$ (not $0$) at the surface, unlike every face mask $m^u$, $m^v$, $m^w$ elsewhere in this document: $c$ is a property of the whole water column, not of a face.
+$N^2$ (the buoyancy frequency squared, Section~\ref{sec:prognostic}) is itself a function of $T$ and $S$ through the equation of state. It is a difference of two locally referenced densities (Section~\ref{sec:coefficients}), not the linearised $\rho_T$, $\rho_S$ estimate that the isoneutral slopes use.
+The eddy diffusivities, like $\kappa_H$ (Section~\ref{sec:vmix}), are evaluated at the start of a step from the fields at time level $n$: $N^2$ computed from $T^n$, $S^n$ (at the end of the step that produced them), together with $E^n$. They are then held fixed while $T$ and $S$ are advanced to level $n+1$ (Section~\ref{sec:step}).
+
+\subsubsection*{Boundaries}
+As for the Redi term (Section~\ref{sec:iso}): every face mask that would need to reach past a wall, a coastline or the sea floor is already zero in the triads that $\mathsf{F}$ is built from.
+
+\subsubsection*{Properties}
+\begin{itemize}
+\item $\mathsf{F}$ conserves heat in the same cell-volume-weighted sense as $\mathsf{E}$ (Section~\ref{sec:iso}).
+\item $\mathsf{F}$ depends on $T$ and $S$ (through the shared triads) and, through $K_\text{gm}$, on $N^2$ and the eddy kinetic energy $E$ -- a third prognostic field with no counterpart in the Redi or vertical mixing terms.
+\item Because $K_\text{gm}$ is not a constant, and $\mathsf{F}$ has no local term at all ($K_{11}=K_{22}=0$), none of its entries reduces to anything as simple as a Laplacian: even the 5 same-level entries that carry a near-constant Laplacian piece for the Redi term (Section~\ref{sec:iso}) are, for $\mathsf{F}$, built entirely from the triads, weighted by $\bar K^e$, $\bar K^n$ or $K_\text{gm}$.
+\end{itemize}
+
+\section{Salinity}\label{sec:salinity}
+
+\subsection{Prognostic equation (continuous form)}
+
+Salinity $S$ (g\,kg$^{-1}$) obeys the same equation as temperature -- equation~\eqref{eq:T} of Section~\ref{sec:prognostic} with $S$ in place of $T$:
+\begin{equation}
+\frac{\partial S}{\partial t}
+= \underbrace{-\nabla \cdot \left( \mathbf{u}\, S \right)}_{\text{advection}}
+\; + \; \underbrace{\nabla \cdot \left( \mathsf{K}_\text{Redi} \nabla S \right)}_{\text{isoneutral diffusion}}
+\; + \; \underbrace{\nabla \cdot \left( \mathsf{K}_\text{skew} \nabla S \right)}_{\text{GM eddy advection}}
+\; + \; \underbrace{\frac{\partial}{\partial z} \left( \kappa_H \frac{\partial S}{\partial z} \right)}_{\text{vertical mixing}},
+\label{eq:S}
+\end{equation}
+using the same $\mathbf{u}$, $\mathsf{K}_\text{Redi}$, $\mathsf{K}_\text{skew}$ and $\kappa_H$, since these come from the full density field (Section~\ref{sec:prognostic}), which already depends on both $T$ and $S$.
+The only difference is the surface boundary condition: for salinity it is zero flux, not $Q_T$, so (unlike temperature) $S$ has no source or sink anywhere in the domain.
+
+In the competition's initial state the salinity is the same in every ocean cell, $S = 34.718~\text{g}\,\text{kg}^{-1}$.
+Every term of~\eqref{eq:S} is a divergence of fluxes that are proportional to differences of $S$ (the advective flux divergence of a uniform field is $S$ times the divergence of the velocity, which is zero, Section~\ref{sec:advection}), so the salinity stays uniform for all time; in the 200-year state its largest and smallest values differ by $10^{-9}~\text{g}\,\text{kg}^{-1}$, which is rounding error.
+Consequently every $\partial_x S$, $\partial_y S$, $\partial_z S$ in Section~\ref{sec:temperature} is zero, the density, the isoneutral slopes and $N^2$ are functions of temperature (and pressure) alone, and the salinity equation need not be solved.
+
+\subsection{Discretisation}
+
+Advection, isoneutral diffusion and GM eddy advection do not depend on which tracer they act on: Sections~\ref{sec:advection}, \ref{sec:iso} and~\ref{sec:gm} apply to $S$ unchanged, with the same matrices $\mathsf{M}$, $\mathsf{E}$, $\mathsf{D}_{33}$ and $\mathsf{F}$ built from $\mathbf{u}$, $T$ and $S$ as for temperature, and the same Adams--Bashforth time stepping for advection (with salinity's own history term, $\mathsf{M}_{n-1}S^{n-1}$).
+Vertical mixing (Section~\ref{sec:vmix}) differs only through the boundary condition: with zero surface flux, the surface relaxation matrix and forcing vector are both zero, $\mathsf{R}=0$ and $\mathbf{b}=0$, so the implicit solve has no explicit addition beforehand,
+\[
+\left( \mathsf{I} - \Delta t\, \mathsf{D} \right) S^{n+1} = S''',
+\]
+where $S'''$ is the salinity after advection, isoneutral diffusion and GM eddy advection -- salinity's counterpart to Section~\ref{sec:vmix}'s $T''' + \Delta t(\mathsf{R}T^n+\mathbf{b})$, with the explicit surface term absent.
+$\mathsf{D}$ itself is unchanged: it is built from $\kappa_H$ alone, with no dependence on which tracer it mixes.
+
+\section{Momentum}\label{sec:momentum}
+
+\subsection{\texorpdfstring{Prognostic equations for $u$, $v$ and $w$}{Prognostic equations for u, v and w}}\label{sec:uvw}
+
+The horizontal velocity $(u,v)$ (m\,s$^{-1}$) obeys the hydrostatic, Boussinesq momentum equations on the sphere,
+\begin{align}
+\frac{\partial u}{\partial t} &= \underbrace{-\nabla\cdot(\mathbf{u}u) + \frac{uv\tan\phi}{a}}_{\text{advection and metric term}} + \underbrace{fv}_{\text{Coriolis}} \underbrace{- \frac{1}{\rho_0 a\cos\phi}\frac{\partial p}{\partial\lambda}}_{\text{pressure gradient}} + \underbrace{\nabla_h\cdot(A\nabla_h u)}_{\text{horizontal friction}} + \underbrace{\frac{\partial}{\partial z}\!\left[(\kappa_M+\kappa_\text{gm})\frac{\partial u}{\partial z}\right]}_{\text{vertical friction}}, \label{eq:u}\\
+\frac{\partial v}{\partial t} &= \underbrace{-\nabla\cdot(\mathbf{u}v) - \frac{u^2\tan\phi}{a}}_{\text{advection and metric term}} - \underbrace{fu}_{\text{Coriolis}} \underbrace{- \frac{1}{\rho_0 a}\frac{\partial p}{\partial\phi}}_{\text{pressure gradient}} + \underbrace{\nabla_h\cdot(A\nabla_h v)}_{\text{horizontal friction}} + \underbrace{\frac{\partial}{\partial z}\!\left[(\kappa_M+\kappa_\text{gm})\frac{\partial v}{\partial z}\right]}_{\text{vertical friction}}, \label{eq:v}
+\end{align}
+with $\mathbf{u}=(u,v,w)$; there is no biharmonic friction, bottom drag or Rayleigh damping.
+$f = 2\Omega\sin\phi$ is the Coriolis parameter.
+$p$ is the hydrostatic pressure, $\partial p/\partial z = -\rho g$, with $\rho$ the in-situ density from the TEOS-10 equation of state \citep{teos10}; its depth-independent (barotropic) part is not obtained from $p$ directly, since the model has a rigid lid rather than a free surface, but from the streamfunction $\psi$ below.
+Write $\dot{\mathbf{u}} = (\dot u, \dot v)$ for the right-hand side of the $u$, $v$ equations above \emph{without} this still-undetermined barotropic part of the pressure gradient; $\dot{\mathbf{u}}$ is used in Section~\ref{sec:psi} below.
+
+In this implementation, $p$ at each depth is obtained by integrating $\rho$ downward from the surface, giving a baroclinic pressure whose horizontal gradient is one of the terms making up $\dot{\mathbf{u}}$; this is the pressure-gradient term of the equations above. Once $\psi$ has been advanced, the depth mean of the updated velocity is subtracted and replaced by the depth-mean velocity implied by the new $\psi$.
+
+The horizontal viscosity is $A = A_h\cos\phi$ with $A_h = (4^\circ\times\pi a/180^\circ)^3 \times 2\times10^{-11}~\text{m}^{-1}\,\text{s}^{-1} = 1.759\times10^6~\text{m}^2\,\text{s}^{-1}$; the friction acts on $u$ and $v$ as on scalars (there are no metric terms in it).
+$\kappa_M$ is the vertical viscosity of the TKE closure, $\max(2\times10^{-4}~\text{m}^2\,\text{s}^{-1},\, \min(100~\text{m}^2\,\text{s}^{-1},\, 0.1\,\ell\sqrt{e}))$: the quantity that sets $\kappa_H$ in Section~\ref{sec:prognostic}, with a lower bound.
+$\kappa_\text{gm} = K_\text{gm}\min(0.01,\, f^2/N^2)$ (the factor $0.01$ is dimensionless) is an additional vertical viscosity from the GM/TEM formalism, built from the same $K_\text{gm}$ and $N^2$ as Section~\ref{sec:gm}.
+The two parts of the vertical friction are written as one term in \eqref{eq:u} and \eqref{eq:v}, but the model applies them as two implicit steps, one after the other; with $\kappa_M$ as large as $100~\text{m}^2\,\text{s}^{-1}$ the result differs from that of a single step with the summed viscosity (Section~\ref{sec:mom_discrete}).
+The wind stress $\boldsymbol\tau = (\tau^x, \tau^y)$ enters \eqref{eq:u} and \eqref{eq:v} through the surface boundary condition of the vertical friction term, the momentum counterpart of the heat flux $Q_T$ for temperature:
+\[
+(\kappa_M+\kappa_\text{gm})\frac{\partial u}{\partial z}\bigg|_{z=0} = \frac{\tau^x}{\rho_0},
+\qquad
+(\kappa_M+\kappa_\text{gm})\frac{\partial v}{\partial z}\bigg|_{z=0} = \frac{\tau^y}{\rho_0}.
+\]
+In the discrete model this surface stress is applied as a body force on the top cell, $\boldsymbol\tau/(\rho_0\Delta z_{15})$, added to the tendencies of $u$ and $v$ at level 15 (Section~\ref{sec:mom_discrete}), while the discrete vertical friction operator itself has no stress at the surface.
+There is no flux of momentum through the sea floor, and the side walls are free-slip.
+
+$w$ is not a prognostic variable: it has no equation of its own, and is instead diagnosed at every time step from the incompressibility condition $\nabla\cdot\mathbf{u}=0$ (Section~\ref{sec:advection}), integrated upward from $w=0$ at the sea floor. The rigid lid makes the resulting $w$ vanish at the surface.
+
+\subsection{\texorpdfstring{Prognostic equation for $\psi$}{Prognostic equation for psi}}\label{sec:psi}
+
+Because the model has a rigid lid, the depth-integrated horizontal transport is non-divergent and is represented by a streamfunction $\psi$ (m$^3$\,s$^{-1}$), $(U,V) = (-\partial\psi/\partial y,\, \partial\psi/\partial x)$, where $(U,V)$ is $(u,v)$ integrated over depth and $\partial/\partial x = (a\cos\phi)^{-1}\partial/\partial\lambda$, $\partial/\partial y = a^{-1}\partial/\partial\phi$.
+The depth-mean velocity is $(U,V)/H$, with $H$ the local depth.
+$\psi$ is prognostic. The depth mean of the momentum equations, with the unknown barotropic pressure gradient eliminated by taking the curl, gives an elliptic equation for its time derivative,
+\[
+\nabla_h\cdot\left( \frac{1}{H}\nabla_h \frac{\partial \psi}{\partial t} \right) = \hat{\mathbf{z}}\cdot\left(\nabla_h\times \bar{\mathbf{G}}\right), \qquad \bar{\mathbf{G}} = \frac{1}{H}\int_{-H}^0 \dot{\mathbf{u}}\,dz,
+\]
+with $\dot{\mathbf{u}}$ as defined in Section~\ref{sec:uvw} and the curl as defined in Section~\ref{sec:coords}.
+(The operator is $\nabla_h\cdot H^{-1}\nabla_h$ and the forcing is the curl of the depth-\emph{mean} tendency, because it is the depth-mean velocity, not the transport, whose tendency differs from $\bar{\mathbf{G}}$ by a gradient.)
+Dirichlet boundary conditions are imposed on the coastline of every land mass: $\psi$ is a constant on each.
+There are six land masses in this setup. On one of them (the reference) $\psi$ is held at zero; on each of the other five (``islands'') it is a separate, time-dependent constant found from the \emph{island rule} \citep{godfrey1989}.
+Write $\psi_n$ for the solution of the homogeneous equation $\nabla_h\cdot(H^{-1}\nabla_h\psi_n)=0$ with $\psi_n=1$ on island $n$ and $0$ on every other land mass, and $\chi$ for the solution of the forced equation with zero on every land mass. Then
+\[
+\frac{\partial\psi}{\partial t} = \chi + \sum_{n} \dot\psi_n\, \psi_n ,
+\]
+and the five rates $\dot\psi_n$ follow from requiring that the circulation of the depth-mean velocity tendency around each island's coastline $C_m$ equals that of $\bar{\mathbf{G}}$ (a gradient integrates to zero around a closed loop, so the unknown barotropic pressure does not contribute):
+\[
+\sum_n P_{mn}\, \dot\psi_n = \oint_{C_m} \bar{\mathbf{G}}\cdot d\mathbf{l} - \oint_{C_m} \bar{\mathbf{u}}[\chi]\cdot d\mathbf{l},
+\qquad
+P_{mn} = \oint_{C_m} \bar{\mathbf{u}}[\psi_n]\cdot d\mathbf{l},
+\]
+where $\bar{\mathbf{u}}[\psi] = H^{-1}(-\partial\psi/\partial y,\, \partial\psi/\partial x)$ is the depth-mean velocity of a streamfunction. $P_{mn}$ and the $\psi_n$ are fixed in time and computed once.
+
+\subsection{Spatial discretisation of the momentum equations}\label{sec:mom_discrete}
+
+The discretisation of the momentum advection and metric terms below is transcribed from the source and was not tested by an independent implementation.
+
+The grid and the masks $m$, $m^u$, $m^v$, $m^w$ are those of Section~\ref{sec:grid}: $u_{i,j,k}$ is on the east face and $v_{i,j,k}$ on the north face of tracer cell $(i,j,k)$.
+The ``$u$ cell'' $(i,j,k)$ is the box centred on that east face (between tracer points $i$ and $i+1$), with horizontal area $c_j\Delta x\Delta y$; the ``$v$ cell'' is centred on the north face, with area $c^v_j\Delta x\Delta y$.
+Of the $54{,}000$ east faces $26{,}501$ are open ($m^u = 1$), and $25{,}856$ of the north faces.
+The depths at the velocity points are
+\[
+H^u_{i,j} = \sum_{k=1}^{15} m^u_{i,j,k}\,\Delta z_k, \qquad H^v_{i,j} = \sum_{k=1}^{15} m^v_{i,j,k}\,\Delta z_k .
+\]
+All terms below are evaluated from the fields at time level $n$.
+The model accumulates them in two tendencies: $\mathcal{A}^u$, which is stepped with Adams--Bashforth (Coriolis, metric terms, wind, advection, hydrostatic pressure gradient), and $\mathcal{F}^u$, which is not (vertical and horizontal friction); likewise $\mathcal{A}^v$, $\mathcal{F}^v$ (Section~\ref{sec:mom_time}).
+Indices that are the same on both sides of a formula are omitted where that is unambiguous.
+
+\subsubsection*{Density and hydrostatic pressure}
+The model's density variable is the in-situ density anomaly $\rho_{i,j,k} = m_{i,j,k}\left[ \rho_\text{TEOS}(S_{i,j,k}, T_{i,j,k}, |z_k|) - \rho_0 \right]$, with the pressure argument $|z_k|$ in dbar; $\rho$ means this anomaly from here on (only differences and derivatives of the density enter the equations).
+The hydrostatic pressure divided by $\rho_0$ (m$^2$\,s$^{-2}$) at the tracer points is integrated downward from the surface with the trapezoidal rule:
+\[
+P_{i,j,15} = m_{i,j,15}\,\frac{g}{\rho_0}\,\tfrac12\Delta z^w_{15}\,\rho_{i,j,15},
+\qquad
+P_{i,j,k} = m_{i,j,k}\left[ P_{i,j,k+1} + \frac{g}{\rho_0}\,\tfrac12\Delta z^w_k \left( \rho_{i,j,k+1} + \rho_{i,j,k} \right) \right], \quad k = 14,\dots,1,
+\]
+with $\Delta z^w_{15} = 70$~m, so that $\tfrac12\Delta z^w_{15} = 35$~m is the depth of the top tracer point.
+$P$ is linear in $\rho$, and only its horizontal differences are used.
+The pressure-gradient tendencies are
+\[
+\mathcal{A}^u_{i,j,k} \mathrel{+}= -m^u_{i,j,k}\,\frac{P_{i+1,j,k} - P_{i,j,k}}{c_j\,\Delta x},
+\qquad
+\mathcal{A}^v_{i,j,k} \mathrel{+}= -m^v_{i,j,k}\,\frac{P_{i,j+1,k} - P_{i,j,k}}{\Delta y}.
+\]
+
+\subsubsection*{Coriolis and metric terms}
+The Coriolis parameter is held at the tracer latitudes, $f_j = 2\Omega\sin\phi_j$.
+The Coriolis terms use four-point averages, weighted so that they do no work:
+\begin{align*}
+\mathcal{A}^u_{i,j,k} &\mathrel{+}= \tfrac14\, m^u_{i,j,k}\, f_j \left( v_{i,j,k} + v_{i,j-1,k} + v_{i+1,j,k} + v_{i+1,j-1,k} \right), \\
+\mathcal{A}^v_{i,j,k} &\mathrel{+}= -\tfrac14\, m^v_{i,j,k}\, \frac{1}{c^v_j} \left[ f_j\, c_j \left( u_{i-1,j,k} + u_{i,j,k} \right) + f_{j+1}\, c_{j+1} \left( u_{i-1,j+1,k} + u_{i,j+1,k} \right) \right].
+\end{align*}
+The metric terms, with $t_j = \tan\phi_j/a$, are
+\begin{align*}
+\mathcal{A}^u_{i,j,k} &\mathrel{+}= \tfrac18\, m^u_{i,j,k}\, t_j \left[ (u_{i,j,k} + u_{i-1,j,k})(v_{i,j,k} + v_{i,j-1,k}) + (u_{i+1,j,k} + u_{i,j,k})(v_{i+1,j,k} + v_{i+1,j-1,k}) \right], \\
+\mathcal{A}^v_{i,j,k} &\mathrel{+}= -\tfrac18\, m^v_{i,j,k}\, \frac{1}{c^v_j} \left[ t_j\, c_j \left( u_{i,j,k} + u_{i-1,j,k} \right)^2 + t_{j+1}\, c_{j+1} \left( u_{i,j+1,k} + u_{i-1,j+1,k} \right)^2 \right].
+\end{align*}
+
+\subsubsection*{Wind stress}
+The wind stress components $\tau^x_{i,j}$, $\tau^y_{i,j}$ (N\,m$^{-2}$, constant in time) are read on the tracer grid and used at the $u$ and $v$ points with the same indices, without interpolation. They act on the top level only:
+\[
+\mathcal{A}^u_{i,j,15} \mathrel{+}= m^u_{i,j,15}\,\frac{\tau^x_{i,j}}{\rho_0\,\Delta z_{15}},
+\qquad
+\mathcal{A}^v_{i,j,15} \mathrel{+}= m^v_{i,j,15}\,\frac{\tau^y_{i,j}}{\rho_0\,\Delta z_{15}}.
+\]
+
+\subsubsection*{Advection}
+Momentum advection is the second-order, energy-conserving flux form. With the volume transports through the faces of the tracer cells,
+\[
+\mathcal{U}_{i,j,k} = m^u u\,\Delta y\,\Delta z_k, \qquad
+\mathcal{V}_{i,j,k} = m^v v\,c^v_j\,\Delta x\,\Delta z_k, \qquad
+\mathcal{W}_{i,j,k} = m^w w\,c_j\,\Delta x\,\Delta y,
+\]
+the fluxes of $u$ through the east, north and top faces of the $u$ cell are
+\begin{align*}
+F^e_{i,j,k} &= \tfrac14 (u_{i,j,k} + u_{i+1,j,k})(\mathcal{U}_{i,j,k} + \mathcal{U}_{i+1,j,k}), \\
+F^n_{i,j,k} &= \tfrac14 (u_{i,j,k} + u_{i,j+1,k})(\mathcal{V}_{i,j,k} + \mathcal{V}_{i+1,j,k}), \\
+F^t_{i,j,k} &= \tfrac14 (u_{i,j,k} + u_{i,j,k+1})(\mathcal{W}_{i,j,k} + \mathcal{W}_{i+1,j,k}), \qquad k \le 14,
+\end{align*}
+with $F^t_{i,j,15} = 0$ and no flux below the lowest level, and
+\[
+\mathcal{A}^u_{i,j,k} \mathrel{+}= -m^u_{i,j,k}\,\frac{(F^e_{i,j,k} - F^e_{i-1,j,k}) + (F^n_{i,j,k} - F^n_{i,j-1,k}) + (F^t_{i,j,k} - F^t_{i,j,k-1})}{c_j\,\Delta x\,\Delta y\,\Delta z_k}.
+\]
+For $v$ the fluxes are
+\begin{align*}
+F^e_{i,j,k} &= \tfrac14 (v_{i,j,k} + v_{i+1,j,k})(\mathcal{U}_{i,j,k} + \mathcal{U}_{i,j+1,k}), \\
+F^n_{i,j,k} &= \tfrac14 (v_{i,j,k} + v_{i,j+1,k})(\mathcal{V}_{i,j,k} + \mathcal{V}_{i,j+1,k}), \\
+F^t_{i,j,k} &= \tfrac14 (v_{i,j,k} + v_{i,j,k+1})(\mathcal{W}_{i,j,k} + \mathcal{W}_{i,j+1,k}), \qquad k \le 14,
+\end{align*}
+and the same divergence with $m^v$ and the $v$-cell area $c^v_j\Delta x\Delta y$ in place of $m^u$ and $c_j\Delta x\Delta y$.
+Advection and the metric terms are the only terms of the momentum equations that are not linear in $(u,v)$. In this setup they are about $0.1\%$ of the Coriolis term.
+
+\subsubsection*{Horizontal friction}
+Harmonic friction with viscosity $A_h\cos\phi$ and free-slip walls (the flux through a face is zero unless the velocity points on both sides are open):
+\begin{align*}
+G^e_{i,j,k} &= A_h\,c_j\,\frac{u_{i+1,j,k} - u_{i,j,k}}{c_j\,\Delta x}\, m^u_{i+1,j,k}\, m^u_{i,j,k},
+&
+G^n_{i,j,k} &= A_h\,c^v_j\,\frac{u_{i,j+1,k} - u_{i,j,k}}{\Delta y}\, c^v_j\, m^u_{i,j+1,k}\, m^u_{i,j,k}, \\
+\mathcal{F}^u_{i,j,k} &\mathrel{+}= m^u_{i,j,k}\left[ \frac{G^e_{i,j,k} - G^e_{i-1,j,k}}{c_j\,\Delta x} + \frac{G^n_{i,j,k} - G^n_{i,j-1,k}}{c_j\,\Delta y} \right]
+\end{align*}
+for $u$, and for $v$
+\begin{align*}
+G^e_{i,j,k} &= A_h\,c^v_j\,\frac{v_{i+1,j,k} - v_{i,j,k}}{c^v_j\,\Delta x}\, m^v_{i+1,j,k}\, m^v_{i,j,k},
+&
+G^n_{i,j,k} &= A_h\,c_{j+1}\,\frac{v_{i,j+1,k} - v_{i,j,k}}{\Delta y}\, c_{j+1}\, m^v_{i,j+1,k}\, m^v_{i,j,k}, \\
+\mathcal{F}^v_{i,j,k} &\mathrel{+}= m^v_{i,j,k}\left[ \frac{G^e_{i,j,k} - G^e_{i-1,j,k}}{c^v_j\,\Delta x} + \frac{G^n_{i,j,k} - G^n_{i,j-1,k}}{c^v_j\,\Delta y} \right].
+\end{align*}
+In each flux the first cosine is the scaling of the viscosity (taken at the latitude of the face) and, in $G^n$, the second is the metric factor of the divergence.
+The east--west direction is periodic; $G^n$ is zero through the northern and southern walls.
+
+\subsubsection*{Vertical friction}
+The vertical viscosity $\kappa_{M}$ and the eddy viscosity $\kappa_\text{gm}$ live on the top faces of the tracer cells (Section~\ref{sec:coefficients}). At the velocity points they are averaged from the two neighbouring columns,
+\[
+\bar\kappa^u_{i,j,k} = \tfrac12\left( \kappa_{i,j,k} + \kappa_{i+1,j,k} \right), \qquad
+\bar\kappa^v_{i,j,k} = \tfrac12\left( \kappa_{i,j,k} + \kappa_{i,j+1,k} \right).
+\]
+For a viscosity $\kappa$ and one column of $u$ points, let $\mathsf{A}[\kappa]$ be the tridiagonal flux-form diffusion operator with no stress at the top and at the bottom,
+\[
+\left( \mathsf{A}[\kappa]\,u \right)_k = \frac{1}{\Delta z_k}\left[ \bar\kappa^u_{k}\,m^u_{k+1}m^u_{k}\,\frac{u_{k+1} - u_k}{\Delta z^w_k} - \bar\kappa^u_{k-1}\,m^u_{k}m^u_{k-1}\,\frac{u_k - u_{k-1}}{\Delta z^w_{k-1}} \right],
+\]
+where the first term is absent at $k=15$ and the second at $k=1$ (and both vanish through the masks at the sea floor).
+The model applies two backward-Euler steps of length $\Delta t_m = 1800$~s, the first with $\kappa_M$ and the second, starting from the result of the first, with $\kappa_\text{gm}$:
+\[
+u^\ast = \left( \mathsf{I} - \Delta t_m \mathsf{A}[\kappa_M] \right)^{-1} u^n,
+\qquad
+u^{\ast\ast} = \left( \mathsf{I} - \Delta t_m \mathsf{A}[\kappa_\text{gm}] \right)^{-1} u^\ast,
+\qquad
+\mathcal{F}^u \mathrel{+}= \frac{u^{\ast\ast} - u^n}{\Delta t_m},
+\]
+and the same for $v$ with $\bar\kappa^v$ and $m^v$.
+As a tendency acting on $u^n$ the vertical friction is therefore the operator
+\begin{equation}
+\mathsf{F}^z = \frac{1}{\Delta t_m}\left[ \left( \mathsf{I} - \Delta t_m \mathsf{A}[\kappa_\text{gm}] \right)^{-1}\left( \mathsf{I} - \Delta t_m \mathsf{A}[\kappa_M] \right)^{-1} - \mathsf{I} \right],
+\label{eq:Fz}
+\end{equation}
+a full $15\times15$ block for each column of $u$ or $v$ points, and not $\mathsf{A}[\kappa_M] + \mathsf{A}[\kappa_\text{gm}]$.
+The two agree only when $\Delta t_m\,\kappa/(\Delta z\,\Delta z^w)$ is small; with $\kappa_M = 100~\text{m}^2\,\text{s}^{-1}$ near the surface that number is about $100$.
+
+The dissipation of kinetic energy by the first of the two steps is the $\varepsilon_v$ of the TKE closure (Section~\ref{sec:prognostic}). On the top face of $u$ cell $(i,j,k)$, $k \le 14$,
+\[
+d^u_{i,j,k} = \bar\kappa^u_{M,i,j,k}\; m^u_{i,j,k+1}m^u_{i,j,k}\; \frac{u^\ast_{i,j,k+1} - u^\ast_{i,j,k}}{\Delta z^w_k}\; \frac{u^n_{i,j,k+1} - u^n_{i,j,k}}{\Delta z^w_k},
+\]
+and $d^v$ likewise, with $d^u = d^v = 0$ at $k = 15$; these are averaged to the tracer columns,
+\begin{equation}
+\varepsilon_{v,i,j,k} = \tfrac12\left( d^u_{i,j,k} + d^u_{i-1,j,k} \right) + \frac{c^v_j\, d^v_{i,j,k} + c^v_{j-1}\, d^v_{i,j-1,k}}{2\,c_j}.
+\label{eq:epsv}
+\end{equation}
+$\varepsilon_v$ is stored and used by the TKE closure at the start of the \emph{next} step.
+
+\subsubsection*{Matrix form}
+Let $u$ and $v$ also denote the vectors of the velocities on the open east faces ($26{,}501$ values) and on the open north faces ($25{,}856$ values), and $\rho$ the vector of the density anomaly in the ocean cells. Each term above is then a matrix acting on these vectors, in the same way as the matrices $\mathsf{M}$, $\mathsf{V}$, $\mathsf{E}$ and $\mathsf{F}$ of the temperature equation:
+\begin{center}
+\begin{tabular}{llll}
+\hline
+Term & Tendency of $u$ & Tendency of $v$ & Matrix depends on \\
+\hline
+Coriolis & $\mathsf{C}_{uv}\,v$ & $\mathsf{C}_{vu}\,u$ & grid only \\
+Metric & $\mathsf{T}_u[v]\,u$ & $\mathsf{T}_v[u]\,u$ & $v$; $u$ \\
+Advection & $\mathsf{M}_u[\mathbf{u}]\,u$ & $\mathsf{M}_v[\mathbf{u}]\,v$ & $u$, $v$, $w$ \\
+Pressure gradient & $\mathsf{P}_u\,\rho$ & $\mathsf{P}_v\,\rho$ & grid only \\
+Wind stress & $\mathbf{f}^u_\tau$ & $\mathbf{f}^v_\tau$ & (constant vectors) \\
+Horizontal friction & $\mathsf{F}^h_u\,u$ & $\mathsf{F}^h_v\,v$ & grid only \\
+Vertical friction & $\mathsf{F}^z_u\,u$ & $\mathsf{F}^z_v\,v$ & $\kappa_M$, $\kappa_\text{gm}$ \\
+\hline
+\end{tabular}
+\end{center}
+\begin{itemize}
+\item $\mathsf{C}_{uv}$ and $\mathsf{C}_{vu}$ hold the coefficients of the four-point averages in the Coriolis terms: four entries per row.
+\item $\mathsf{T}_u[v]$ is the metric term of $u$ read as linear in $u$, with coefficients taken from $v$: $\tfrac18 m^u t_j (v_{i,j,k} + v_{i,j-1,k})$ multiplies $u_{i,j,k} + u_{i-1,j,k}$, and $\tfrac18 m^u t_j (v_{i+1,j,k} + v_{i+1,j-1,k})$ multiplies $u_{i+1,j,k} + u_{i,j,k}$. In $\mathsf{T}_v[u]$, $-\tfrac18 m^v t_j c_j (u_{i,j,k} + u_{i-1,j,k})/c^v_j$ multiplies $u_{i,j,k} + u_{i-1,j,k}$, and likewise at $j+1$.
+\item $\mathsf{M}_u[\mathbf{u}]$ holds the coefficients of $u$ in the advective tendency of $u$ with the transports $\mathcal{U}$, $\mathcal{V}$, $\mathcal{W}$ held fixed, built from $\mathbf{u}$ as the tracer advection matrix $\mathsf{M}$ is (Section~\ref{sec:advection}); a row has up to seven entries, the point itself and its six neighbours. $\mathsf{M}_v[\mathbf{u}]$ is the same for $v$. Since $w$ is diagnosed from $u$ and $v$ (Section~\ref{sec:mom_time}), both depend on $u$ and $v$ alone.
+\item $\mathsf{P}_u = -\mathsf{G}^x\mathsf{H}$, where $\mathsf{H}$ is the trapezoidal hydrostatic integral, $P = \mathsf{H}\rho$ (lower triangular within each column), and $(\mathsf{G}^x P)_{i,j,k} = m^u_{i,j,k}(P_{i+1,j,k} - P_{i,j,k})/(c_j\Delta x)$. $\mathsf{P}_v$ is the same with the north difference divided by $\Delta y$.
+\item $\mathbf{f}^u_\tau$ is $m^u_{i,j,15}\,\tau^x_{i,j}/(\rho_0\Delta z_{15})$ at level 15 and zero below; $\mathbf{f}^v_\tau$ likewise with $\tau^y$.
+\item $\mathsf{F}^h_u$, $\mathsf{F}^h_v$ hold the coefficients of the horizontal friction fluxes $G^e$, $G^n$: five entries per row.
+\item $\mathsf{F}^z_u$, $\mathsf{F}^z_v$ are the operator~\eqref{eq:Fz}, one full $15\times15$ block per column of velocity points.
+\end{itemize}
+Collected, with $\mathsf{F}_u = \mathsf{F}^h_u + \mathsf{F}^z_u$ and $\mathsf{F}_v = \mathsf{F}^h_v + \mathsf{F}^z_v$, the two tendencies are
+\begin{equation}
+\begin{pmatrix}\mathcal{A}^u\\ \mathcal{A}^v\end{pmatrix}
+= \begin{pmatrix} \mathsf{M}_u[\mathbf{u}] + \mathsf{T}_u[v] & \mathsf{C}_{uv} \\ \mathsf{C}_{vu} + \mathsf{T}_v[u] & \mathsf{M}_v[\mathbf{u}] \end{pmatrix}
+\begin{pmatrix} u\\ v\end{pmatrix}
++ \begin{pmatrix}\mathsf{P}_u\\ \mathsf{P}_v\end{pmatrix}\rho
++ \begin{pmatrix}\mathbf{f}^u_\tau\\ \mathbf{f}^v_\tau\end{pmatrix},
+\qquad
+\begin{pmatrix}\mathcal{F}^u\\ \mathcal{F}^v\end{pmatrix}
+= \begin{pmatrix}\mathsf{F}_u & 0\\ 0 & \mathsf{F}_v\end{pmatrix}
+\begin{pmatrix}u\\ v\end{pmatrix}.
+\label{eq:mom_matrix}
+\end{equation}
+The metric and advection matrices are the only ones that depend on the velocity itself. The density depends on $T$ and $S$ through the TEOS-10 equation of state.
+
+Three further matrices describe the continuity of the flow and are used in Sections~\ref{sec:mom_time} and~\ref{sec:mom_matrix}:
+\begin{itemize}
+\item $\mathsf{W} = (\mathsf{W}_u\;\mathsf{W}_v)$, the upward sum that gives $w = \mathsf{W}_u u + \mathsf{W}_v v$ (Section~\ref{sec:mom_time});
+\item $\mathsf{D}_u u + \mathsf{D}_v v$, the depth-integrated divergence in each tracer column: $\sum_k \Delta z_k$ times the bracket in the formula for $w$;
+\item $\mathsf{G}_u$, $\mathsf{G}_v$, the gradient of a field $q$ defined on the tracer columns, at every open level: $(\mathsf{G}_u q)_{i,j,k} = -m^u_{i,j,k}(q_{i+1,j} - q_{i,j})/(c_j\Delta x)$ and $(\mathsf{G}_v q)_{i,j,k} = -m^v_{i,j,k}(q_{i,j+1} - q_{i,j})/\Delta y$.
+\end{itemize}
+
+
+\subsection{Discretisation of the streamfunction equation}\label{sec:psi_discrete}
+
+$\psi_{i,j}$ lives at the north-east corner of tracer column $(i,j)$ (longitude of the $u$ points, latitude of the $v$ points).
+The depth-integrated transports through the east and north faces of column $(i,j)$ are
+\begin{equation}
+\Delta y \sum_k m^u_{i,j,k}\, u_{i,j,k}\,\Delta z_k = -\left( \psi_{i,j} - \psi_{i,j-1} \right),
+\qquad
+c^v_j\,\Delta x \sum_k m^v_{i,j,k}\, v_{i,j,k}\,\Delta z_k = \psi_{i,j} - \psi_{i-1,j},
+\label{eq:psi_transport}
+\end{equation}
+and the depth-mean velocities are $\bar u_{i,j} = -(\psi_{i,j} - \psi_{i,j-1})/(\Delta y\,H^u_{i,j})$ and $\bar v_{i,j} = (\psi_{i,j} - \psi_{i-1,j})/(c^v_j\,\Delta x\,H^v_{i,j})$, taken as zero where $H^u$ or $H^v$ is zero. As a matrix, $(\bar u[\psi], \bar v[\psi]) = \mathsf{U}\psi$.
+The discrete curl at corner $(i,j)$ of a field $(a,b)$ held at the $u$ and $v$ points is
+\[
+\operatorname{curl}(a,b)_{i,j} = \frac{b_{i+1,j} - b_{i,j}}{c^v_j\,\Delta x} - \frac{c_{j+1}\,a_{i,j+1} - c_j\,a_{i,j}}{c^v_j\,\Delta y},
+\]
+written $\mathsf{Q}(a,b)$ as a matrix.
+The elliptic operator is the curl of the depth-mean velocity of a streamfunction, $\mathsf{L}\psi = \operatorname{curl}(\bar u[\psi], \bar v[\psi])$:
+\[
+(\mathsf{L}\psi)_{i,j} = \frac{1}{(c^v_j\,\Delta x)^2}\left[ \frac{\psi_{i+1,j} - \psi_{i,j}}{H^v_{i+1,j}} - \frac{\psi_{i,j} - \psi_{i-1,j}}{H^v_{i,j}} \right]
++ \frac{1}{c^v_j\,\Delta y^2}\left[ \frac{c_{j+1}\left( \psi_{i,j+1} - \psi_{i,j} \right)}{H^u_{i,j+1}} - \frac{c_j\left( \psi_{i,j} - \psi_{i,j-1} \right)}{H^u_{i,j}} \right],
+\]
+with $1/H$ taken as zero on closed faces; that is, $\mathsf{L} = \mathsf{Q}\mathsf{U}$.
+The forcing is the curl of the depth-mean tendencies of this step (pressure gradient and friction included, and \emph{without} the Adams--Bashforth weights),
+\[
+\bar G^u_{i,j} = \frac{1}{H^u_{i,j}} \sum_k m^u_{i,j,k} \left( \mathcal{A}^u_{i,j,k} + \mathcal{F}^u_{i,j,k} \right) \Delta z_k,
+\qquad
+\bar G^v_{i,j} = \frac{1}{H^v_{i,j}} \sum_k m^v_{i,j,k} \left( \mathcal{A}^v_{i,j,k} + \mathcal{F}^v_{i,j,k} \right) \Delta z_k ,
+\]
+written $(\bar G^u, \bar G^v) = \mathsf{Z}(\mathcal{A} + \mathcal{F})$, with $\mathsf{Z}$ the matrix of these depth means,
+and the model solves
+\[
+\mathsf{L}\,\chi = \operatorname{curl}\left( \bar G^u, \bar G^v \right)
+\]
+at every corner that is not on the perimeter of a land mass, with $\chi = 0$ on the perimeters. (Veros solves this system iteratively, by preconditioned BiCGSTAB with an absolute tolerance of $10^{-8}$, starting from the extrapolation $2\chi^{n-1} - \chi^{n-2}$ of the two previous solutions.)
+
+\subsubsection*{Land masses}
+Land columns are grouped into land masses, diagonal neighbours counting as connected and the grid being periodic in longitude; there are six.
+The perimeter of a land mass is the set of corners next to it; $\psi$ is a single constant on each perimeter.
+Only differences of $\psi$ across \emph{open} faces affect the velocity, through~\eqref{eq:psi_transport}; the value of $\psi$ at a corner that touches no open face is immaterial.
+For each island $n$ (every land mass but the reference one) the model precomputes $\psi_n$, the solution of $\mathsf{L}\psi_n = 0$ with $\psi_n = 1$ on that island's perimeter and $0$ on the others, and the matrix of circulations $P_{mn}$ of $(\bar u[\psi_n], \bar v[\psi_n])$ around the perimeter of island $m$. A circulation is the sum around the perimeter of the tangential component ($\bar u$ or $\bar v$) times the length of the face ($c_j\Delta x$ or $\Delta y$); write $\mathsf{O}$ for the matrix that takes a depth-mean velocity field to its five island circulations, so that $P_{mn} = (\mathsf{O}\mathsf{U}\psi_n)_m$.
+At each step the five island rates are the solution of the $5\times5$ system
+\[
+\sum_n P_{mn}\,\dot\psi_n = \oint_m \left( \bar G^u, \bar G^v \right)\cdot d\mathbf{l} - \oint_m \left( \bar u[\chi], \bar v[\chi] \right)\cdot d\mathbf{l}
+\;=\; \left( \mathsf{O}\,\mathsf{Z}(\mathcal{A}+\mathcal{F}) - \mathsf{O}\,\mathsf{U}\chi \right)_m.
+\]
+
+\subsection{\texorpdfstring{Time stepping of $u$, $v$ and $\psi$, and the diagnosis of $w$}{Time stepping of u, v and psi, and the diagnosis of w}}\label{sec:mom_time}
+
+The momentum time step is $\Delta t_m = 1800$~s, while the tracer time step is $\Delta t = 86400$~s; one model step advances the velocities by $\Delta t_m$ and the tracers by $\Delta t$ (Section~\ref{sec:step}).
+Write $\mathbf{u} = (u, v)$, $\mathcal{A} = (\mathcal{A}^u, \mathcal{A}^v)$ and $\mathcal{F} = (\mathcal{F}^u, \mathcal{F}^v)$ for the tendencies~\eqref{eq:mom_matrix} evaluated from the fields at level $n$, and $\mathsf{F}$ for the block-diagonal friction matrix of~\eqref{eq:mom_matrix}. With $\epsilon_\text{AB} = 0.1$ as for the tracers~\eqref{eq:ab2}, one step is:
+\begin{enumerate}
+\item The streamfunction tendency, from the total tendency $\mathbf{g}^n = \mathcal{A}^n + \mathcal{F}^n$ without Adams--Bashforth weights (Section~\ref{sec:psi_discrete}):
+\[
+\mathsf{L}\,\chi^n = \mathsf{Q}\,\mathsf{Z}\,\mathbf{g}^n \quad\text{(with $\chi^n = 0$ on the perimeters)},
+\qquad
+\sum_{n'} P_{mn'}\,\dot\psi^n_{n'} = \left( \mathsf{O}\left( \mathsf{Z}\,\mathbf{g}^n - \mathsf{U}\chi^n \right) \right)_m .
+\]
+\item Adams--Bashforth for everything but the friction, which takes a single Euler step (forward for the horizontal part, backward for the vertical part, through $\mathsf{F}^z$):
+\begin{align*}
+\tilde{\mathbf{u}} &= \mathbf{u}^n + \Delta t_m \left[ \mathsf{F}\,\mathbf{u}^n + (1.5+\epsilon_\text{AB})\,\mathcal{A}^{n} - (0.5+\epsilon_\text{AB})\,\mathcal{A}^{n-1} \right], \\
+\psi^{n+1} &= \psi^n + \Delta t_m \left[ (1.5+\epsilon_\text{AB})\,\dot\psi^{n} - (0.5+\epsilon_\text{AB})\,\dot\psi^{n-1} \right],
+\qquad \dot\psi = \chi + \sum_{n'} \dot\psi_{n'}\,\psi_{n'} .
+\end{align*}
+\item The depth mean of $\tilde{\mathbf{u}}$ is replaced by the depth-mean velocity of $\psi^{n+1}$:
+\[
+\mathbf{u}^{n+1} = \left( \mathsf{I} - \mathsf{B}\,\mathsf{Z} \right)\tilde{\mathbf{u}} + \mathsf{B}\,\mathsf{U}\,\psi^{n+1},
+\]
+where $\mathsf{B}$ copies a depth-mean field to every open level of its column, $(\mathsf{B}\bar{\mathbf{u}})_{i,j,k} = (m^u_{i,j,k}\,\bar u_{i,j},\; m^v_{i,j,k}\,\bar v_{i,j})$, and $\mathsf{Z}$ here is the depth mean of a velocity field (as for $\bar G$ in Section~\ref{sec:psi_discrete}).
+\item The vertical velocity at the top face of each cell is diagnosed from the new velocities, $w^{n+1} = \mathsf{W}\mathbf{u}^{n+1}$, by summing the discrete divergence of Section~\ref{sec:advection} upward from the bottom:
+\[
+w^{n+1}_{i,j,k} = -\sum_{k'=1}^{k} \hat m^w_{i,j,k'}\,\Delta z_{k'} \left[ \frac{u_{i,j,k'} - u_{i-1,j,k'}}{c_j\,\Delta x} + \frac{c^v_j\,v_{i,j,k'} - c^v_{j-1}\,v_{i,j-1,k'}}{c_j\,\Delta y} \right]^{n+1}
+\]
+(velocities on closed faces are zero).
+\end{enumerate}
+The superscript $n$ on $\mathcal{A}$, $\chi$ and $\dot\psi_{n'}$ marks the quantities computed in this step, and $n-1$ those kept from the previous step; $\mathcal{A}^n$, $\chi^n$ and $\dot\psi^n_{n'}$ are part of the model state, because the next step needs them.
+
+Because of~\eqref{eq:psi_transport} the depth-integrated flow is non-divergent, so $w_{i,j,15} = 0$ to rounding error.
+
+\subsection{Matrix representation of the momentum equations}\label{sec:mom_matrix}
+
+The matrices of Section~\ref{sec:mom_discrete}, with the barotropic part of Sections~\ref{sec:psi_discrete} and~\ref{sec:mom_time}, combine into one matrix equation for the momentum, as~\eqref{eq:ab2} and Section~\ref{sec:vmix} do for the temperature.
+
+The streamfunction acts on $u$ and $v$ only through the depth-mean tendency $\mathsf{U}\dot\psi$ that it adds in step 3 of Section~\ref{sec:mom_time}. This has the same curl as $\mathsf{Z}\mathbf{g}$ at every corner away from land and the same circulation around every island (Section~\ref{sec:psi_discrete}). Their difference therefore has zero curl and zero circulation around every closed loop, so it is the discrete gradient of a field $p_s$ on the tracer columns, a surface pressure divided by $\rho_0$. The effect of $\psi$ is thus that of a depth-independent pressure gradient $\mathsf{G}p_s$, with $p_s$ whatever keeps the depth-integrated flow non-divergent. With this, the momentum equations of the model are
+\begin{equation}
+\begin{pmatrix} \partial_t u \\ \partial_t v \\ 0 \end{pmatrix}
+=
+\begin{pmatrix}
+\mathsf{F}_u + \mathsf{M}_u[\mathbf{u}] + \mathsf{T}_u[v] & \mathsf{C}_{uv} & \mathsf{G}_u \\
+\mathsf{C}_{vu} + \mathsf{T}_v[u] & \mathsf{F}_v + \mathsf{M}_v[\mathbf{u}] & \mathsf{G}_v \\
+\mathsf{D}_u & \mathsf{D}_v & 0
+\end{pmatrix}
+\begin{pmatrix} u \\ v \\ p_s \end{pmatrix}
++
+\begin{pmatrix} \mathsf{P}_u\,\rho + \mathbf{f}^u_\tau \\ \mathsf{P}_v\,\rho + \mathbf{f}^v_\tau \\ 0 \end{pmatrix},
+\label{eq:mom_full}
+\end{equation}
+where the third row is the rigid lid: the depth-integrated flow is non-divergent~\eqref{eq:psi_transport}.
+\begin{itemize}
+\item \emph{Linear part.} $\mathsf{C}$, $\mathsf{G}$, $\mathsf{D}$ and $\mathsf{F}^h$ depend on the grid only; $\mathsf{F}^z$ depends on $\kappa_M$ and $\kappa_\text{gm}$, and so on $e$, $E$ and $N^2$ (Section~\ref{sec:closures}). With the advection and metric matrices left out,~\eqref{eq:mom_full} is linear in $(u, v, p_s)$ for a given density and given viscosities.
+\item \emph{Non-linear part.} $\mathsf{M}_u[\mathbf{u}]$, $\mathsf{M}_v[\mathbf{u}]$, $\mathsf{T}_u[v]$ and $\mathsf{T}_v[u]$ are matrices built from the velocity itself, as the tracer advection matrix $\mathsf{M}$ is built from $\mathbf{u}$. In this setup these terms are about $0.1\%$ of the Coriolis term.
+\item \emph{Forcing.} $\mathbf{f}_\tau$ is constant. $\mathsf{P}\rho$ is linear in the density, which is a non-linear function of $T$ and $S$ through the equation of state.
+\item \emph{Unknowns.} $u$ and $v$ on the open faces and $p_s$ in the $2319$ ocean columns. $p_s$ is defined only up to a constant (the setup has a single connected basin), and correspondingly one row of $\mathsf{D}$ is redundant, so there are $26{,}501 + 25{,}856 + 2318 = 54{,}675$ independent unknowns.
+\item \emph{Time stepping.} $\partial_t$ stands for the tendency of one model step of length $\Delta t_m$: the friction takes a single Euler step, with $\mathsf{F}^z$ the operator~\eqref{eq:Fz}, which depends on $\Delta t_m$, and the rest takes the Adams--Bashforth weights of Section~\ref{sec:mom_time}. The one exception is the depth mean of the friction, which reaches $\psi$ with Adams--Bashforth weights: the step differs from~\eqref{eq:mom_full} by $0.6\,\Delta t_m\,\mathsf{B}\,\mathsf{Z}\,(\mathcal{F}^n - \mathcal{F}^{n-1})$, which is zero when the friction tendency does not change from one step to the next.
+\item $w = \mathsf{W}\mathbf{u}$, and the streamfunction follows from $u$ and $v$ through~\eqref{eq:psi_transport}, written for every east and north face (closed faces included, where the transport is zero), up to a constant fixed by $\psi = 0$ on the reference land mass.
+\end{itemize}
+
+
+\section{Turbulence closures}\label{sec:closures}
+
+The mixing coefficients $\kappa_H$, $\kappa_M$, $K_\text{gm}$ and $\kappa_\text{gm}$ are not prognostic. They are diagnosed at the start of every step from two prognostic energies, the turbulent kinetic energy $e$ and the eddy kinetic energy $E$, and from the stratification $N^2$.
+Sections~\ref{sec:tke} and~\ref{sec:eke} give the equations of $e$ and $E$ in continuous form, Section~\ref{sec:coefficients} the discrete diagnosis of the coefficients, and Sections~\ref{sec:tke_discrete} and~\ref{sec:eke_discrete} the discretisation of the two energy equations.
+
+\subsection{\texorpdfstring{Prognostic equation for the turbulent kinetic energy $e$}{Prognostic equation for the turbulent kinetic energy e}}\label{sec:tke}
+
+$e$ (m$^2$\,s$^{-2}$), the turbulent kinetic energy that sets the vertical diffusivity $\kappa_H$ and the vertical viscosity $\kappa_M$, is itself prognostic:
+\[
+\frac{\partial e}{\partial t} = \underbrace{-\nabla\cdot(\mathbf{u}e)}_{\text{advection}} + \underbrace{\frac{\partial}{\partial z}\!\left(\alpha_\text{tke}\kappa_M \frac{\partial e}{\partial z}\right)}_{\text{vertical mixing}} - \underbrace{c_\varepsilon\, \frac{e^{3/2}}{\ell}}_{\text{dissipation}} + \underbrace{\mathcal{P}_e}_{\text{production}},
+\]
+where $\ell$ is the mixing length defined in Section~\ref{sec:prognostic}'s ``Vertical diffusivity'' subsubsection, and $\alpha_\text{tke}=30$ (dimensionless) and $c_\varepsilon=0.7$ (dimensionless) are fixed constants.
+The production term is
+\[
+\mathcal{P}_e = \underbrace{\varepsilon_v}_{\text{shear production}} \;-\; \underbrace{\mathcal{P}_v}_{\text{buoyancy production/destruction}} \;-\; \underbrace{\mathcal{P}_\text{adv}}_{\text{advective residual}} \;+\; \underbrace{c_\varepsilon^\text{eke}\,\frac{E^{3/2}}{L}}_{\text{EKE dissipation, Section~\ref{sec:eke}}}.
+\]
+$\varepsilon_v \approx \kappa_M[(\partial_z u)^2 + (\partial_z v)^2]$ is the dissipation of resolved kinetic energy by the $\kappa_M$ part of the vertical friction, the quantity that also enters $\text{Ri}$ in Section~\ref{sec:prognostic}; its discrete form is~\eqref{eq:epsv}.
+$\mathcal{P}_v$ is the rate at which vertical mixing of $T$ and $S$ raises the potential energy of the column. It is computed from the dynamic enthalpy of the equation of state (Section~\ref{sec:eke}, with $\kappa_H\,\partial_z T$, $\kappa_H\,\partial_z S$ as the fluxes) and equals $\kappa_H N^2$ up to a correction from the non-linearity of the equation of state; in the top level it is the corresponding work of the surface heat flux.
+$\mathcal{P}_\text{adv}$ is not a property of $e$'s own advection, but the mismatch between advecting $T$ and $S$ separately (Section~\ref{sec:advection}) and advecting the dynamic enthalpy itself -- a residual of the equation of state's non-linearity, with no continuous-equation counterpart, which is summed over the whole ocean and spread uniformly over every point with $e>0$ so as not to drive $e$ locally negative.
+The last term is the whole of the dissipation of the eddy kinetic energy (Section~\ref{sec:eke}), passed on to $e$ (the internal-wave model that would otherwise receive part of it is switched off).
+At the surface, $e$ is forced by the wind,
+\[
+\alpha_\text{tke}\kappa_M\,\frac{\partial e}{\partial z}\bigg|_{z=0} = \left|\frac{\boldsymbol\tau}{\rho_0}\right|^{3/2};
+\]
+there is no flux through the sea floor.
+
+\subsection{\texorpdfstring{Prognostic equation for the eddy kinetic energy $E$}{Prognostic equation for the eddy kinetic energy E}}\label{sec:eke}
+
+$E$ (m$^2$\,s$^{-2}$), which sets the GM thickness diffusivity $K_\text{gm}$ (Section~\ref{sec:gm}), obeys
+\[
+\frac{\partial E}{\partial t} = \underbrace{-\nabla\cdot(\mathbf{u}E)}_{\text{advection}} + \underbrace{\nabla_h\cdot(K_E\nabla_h E)}_{\text{horizontal mixing}} + \underbrace{\frac{\partial}{\partial z}\!\left(\alpha_\text{eke}\kappa_M \frac{\partial E}{\partial z}\right)}_{\text{vertical mixing}} - \underbrace{c_\varepsilon^\text{eke}\, \frac{E^{3/2}}{L}}_{\text{dissipation}} + \underbrace{\mathcal{P}_E}_{\text{production}},
+\]
+where $K_E = \max(250~\text{m}^2\,\text{s}^{-1},\, K_\text{gm})$ (the discrete form, Section~\ref{sec:eke_discrete}, applies the bound to the average of two neighbouring values), $L$ is the eddy length scale of Section~\ref{sec:prognostic}, and $\alpha_\text{eke}=1$ (dimensionless) and $c_\varepsilon^\text{eke}=0.5$ (dimensionless) are fixed constants.
+The production term is
+\[
+\mathcal{P}_E = \underbrace{\kappa_\text{gm}\!\left[\left(\frac{\partial u}{\partial z}\right)^{2} \!+\! \left(\frac{\partial v}{\partial z}\right)^{2}\right]}_{\text{GM/TEM vertical friction}} + \underbrace{A\!\left(|\nabla_h u|^2 + |\nabla_h v|^2\right)}_{\text{horizontal friction}} - \mathcal{P}_\text{skew} - \mathcal{P}_\text{iso}.
+\]
+The first two terms are the dissipation of resolved kinetic energy by the GM/TEM vertical viscosity $\kappa_\text{gm}$ and by the horizontal friction (both Section~\ref{sec:uvw}), fed into $E$.
+$\mathcal{P}_\text{skew}$ and $\mathcal{P}_\text{iso}$ are the rates at which the GM skew term (Section~\ref{sec:gm}) and the isoneutral diffusion (Section~\ref{sec:iso}, its implicit $K_{33}$ part included) raise the potential energy of the fluid.
+Both are computed from the dynamic enthalpy $H_d(S,T,p)$ of the equation of state (discrete definition in Section~\ref{sec:tke_discrete}), the quantity whose vertical derivative at fixed $S$, $T$ is approximately $g\rho/\rho_0$. With
+\[
+I_T = -\frac{\rho_0}{g}\frac{\partial H_d}{\partial T}, \qquad I_S = -\frac{\rho_0}{g}\frac{\partial H_d}{\partial S}
+\qquad\left( \text{so that } \frac{\partial I_T}{\partial z}\bigg|_{S,T} \approx -\rho_T, \quad \frac{\partial I_S}{\partial z}\bigg|_{S,T} \approx -\rho_S \right),
+\]
+and $\mathbf{F}_T = \mathsf{K}\nabla T$, $\mathbf{F}_S = \mathsf{K}\nabla S$ for the tensor $\mathsf{K}$ of the term in question ($\mathsf{K}_\text{Redi}$ or $\mathsf{K}_\text{skew}$, Section~\ref{sec:prognostic}),
+\[
+\mathcal{P} = \frac{g}{\rho_0}\left( \mathbf{F}_T\cdot\nabla I_T + \mathbf{F}_S\cdot\nabla I_S \right)
+\;\approx\; -\frac{g}{\rho_0}\left( \rho_T\,F_T^z + \rho_S\,F_S^z \right),
+\]
+the work done against gravity by the term's vertical density flux; the approximation neglects the horizontal gradients of $I_T$, $I_S$, which exist only because $\rho_T$ and $\rho_S$ vary.
+For the GM term this is $\mathcal{P}_\text{skew} \approx -K_\text{gm}\,|\mathbf{S}|^2 N^2 < 0$ (with the tapered slopes), so $-\mathcal{P}_\text{skew}$ is the main source of $E$: the release of available potential energy.
+For purely isoneutral diffusion the density flux vanishes to leading order, and $\mathcal{P}_\text{iso}$ is what is left: the effect of the non-linear equation of state, of the taper and of the untapered $K_{11}$, $K_{22}$. It is charged to $E$.
+There is no flux of $E$ through the surface or the sea floor.
+
+\subsection{Discrete diagnosis of the mixing coefficients}\label{sec:coefficients}
+
+$N^2$, $e$, $E$, $\ell$, $\kappa_M$, $\kappa_H$, $K_\text{gm}$ and $\kappa_\text{gm}$ all live on the top faces of the tracer cells, $k = 1,\dots,15$ (the same place as $w$; $k=15$ is the sea surface). $N^2$, $e$, $E$, $K_\text{gm}$ and $\kappa_\text{gm}$ are zero where $\hat m^w = 0$, that is on land and on faces at or below the sea floor ($\hat m^w_{i,j,15} = m_{i,j,15}$); $\kappa_H$ and $\kappa_M$ take their lower bounds there.
+All of them are computed from the fields at time level $n$ at the start of the step.
+
+\subsubsection*{Stratification}
+\[
+N^2_{i,j,k} = -\frac{g}{\rho_0}\, m^w_{i,j,k}\, \frac{\rho_\text{TEOS}(S_{i,j,k+1}, T_{i,j,k+1}, |z_k|) - \rho_\text{TEOS}(S_{i,j,k}, T_{i,j,k}, |z_k|)}{\Delta z^w_k}, \quad k = 1,\dots,14,
+\qquad
+N^2_{i,j,15} = N^2_{i,j,14}.
+\]
+The density of the upper cell is evaluated at the pressure of the lower cell, so this is a locally referenced density difference.
+$N^2$ at level $n+1$ is computed, with the density, the dynamic enthalpy and $I_T$, $I_S$, at the end of the temperature step, and is part of the model state.
+
+\subsubsection*{Mixing length, viscosity and diffusivity}
+In each column, with $\ell_\text{min} = 10^{-8}$~m:
+\begin{enumerate}
+\item $\ell_k = \hat m^w_k\,\sqrt{2}\,\sqrt{\max(0, e_k)}\,/\sqrt{\max(10^{-12}~\text{s}^{-2},\, N^2_k)}$ for $k = 1,\dots,15$;
+\item for $k = 14, 13, \dots, 1$ in that order: $\ell_k \leftarrow \min(\ell_k,\, \ell_{k+1} + \Delta z_{k+1})$;
+\item $\ell_{15} \leftarrow \min(\ell_{15},\, \ell_\text{min} + \Delta z_{15})$;
+\item for $k = 2, 3, \dots, 15$ in that order: $\ell_k \leftarrow \min(\ell_k,\, \ell_{k-1} + \Delta z_k)$;
+\item $\ell_k \leftarrow \max(\ell_k,\, \ell_\text{min})$.
+\end{enumerate}
+Step 4 starts from $\ell = 0$ on the sea floor, so $\ell$ cannot exceed the height above the bottom. Step 3 limits the surface value to $50$~m; because it comes after step 2, the levels below the surface were limited in step 2 by the surface value of step 1, not by the limited one.
+Then
+\begin{align*}
+\tilde\kappa_{M,k} &= \min\!\left( 100~\text{m}^2\,\text{s}^{-1},\; 0.1\,\ell_k \sqrt{\max(0, e_k)} \right), \\
+\text{Ri}_k &= \frac{N^2_k}{\max\!\left( 10^{-12},\; \varepsilon_{v,k} / \max(10^{-12}, \tilde\kappa_{M,k}) \right)}, \qquad
+\text{Pr}_k = \max\!\left( 1,\; \min(10,\; 6.6\,\text{Ri}_k) \right), \\
+\kappa_{H,k} &= \max\!\left( \kappa_\text{BL}(z^w_k),\; 2\times10^{-5}~\text{m}^2\,\text{s}^{-1},\; \tilde\kappa_{M,k}/\text{Pr}_k \right), \\
+\kappa_{M,k} &= \max\!\left( 2\times10^{-4}~\text{m}^2\,\text{s}^{-1},\; \tilde\kappa_{M,k} \right),
+\end{align*}
+with $\kappa_\text{BL}$ the Bryan--Lewis profile of Section~\ref{sec:prognostic} at the depth $z^w_k$ of the face, and $\varepsilon_v$~\eqref{eq:epsv} the value stored by the friction of the previous step.
+$\kappa_H$ and $\kappa_M$ carry no land mask of their own; the masks of the terms that use them remove them on closed faces.
+$\kappa_{H,k}$ multiplies the temperature difference across the top face of cell $k$ in Section~\ref{sec:vmix}; $\kappa_{H,15}$ is not used.
+$\kappa_H$ and $\kappa_M$ are strongly non-linear in the state. In particular $N^2$ enters $\ell$ only where it is positive: a change of sign of $N^2$ at a face switches $\kappa_H$ there between its background value (of order $10^{-5}$ to $10^{-4}~\text{m}^2\,\text{s}^{-1}$) and values up to $100~\text{m}^2\,\text{s}^{-1}$. In the 200-year state $N^2 < 0$ on $12\%$ of the interior faces and $\kappa_H > 1~\text{m}^2\,\text{s}^{-1}$ on $7\%$.
+
+\subsubsection*{Eddy diffusivity and eddy viscosity}
+$K_{\text{gm},i,j,k}$ follows Section~\ref{sec:prognostic} and the paragraph on the thickness diffusivity in Section~\ref{sec:gm}, with $\sqrt{E}$ replaced by $\sqrt{\max(0,E_{i,j,k})}$ and with $|f_j|$ and $\beta_j$ (and $2\beta_j$ in $L_\text{Ro}$) bounded below by $10^{-16}$ in the denominators; $c_{i,j}$ and $L_\text{Ro}$ are properties of the column, $L_\text{Rh}$, $L$ and $K_\text{gm}$ of each face. The eddy viscosity is
+\[
+\kappa_{\text{gm},i,j,k} = \hat m^w_{i,j,k}\; K_{\text{gm},i,j,k}\; \min\!\left( 0.01,\; \frac{f_j^2}{\max(10^{-9}~\text{s}^{-2},\, N^2_{i,j,k})} \right).
+\]
+In the 200-year state $K_\text{gm}$ ranges from $0.06~\text{m}^2\,\text{s}^{-1}$ to its cap of $10^4~\text{m}^2\,\text{s}^{-1}$, and $\kappa_\text{gm}$ has a median of $0.14$ and a maximum of $46~\text{m}^2\,\text{s}^{-1}$.
+
+\subsection{\texorpdfstring{Discretisation of the $e$ equation}{Discretisation of the e equation}}\label{sec:tke_discrete}
+
+The discretisation of the $e$ equation below is transcribed from the source and was not tested by an independent implementation.
+
+$e_{i,j,k}$ is on the top face of tracer cell $(i,j,k)$. The control volume of an interior point $k \le 14$ extends between the tracer points $k$ and $k+1$ and has thickness $\Delta z^w_k$; that of the surface point $k=15$ is the upper $\tfrac12\Delta z^w_{15} = 35$~m. Write $h_k = \Delta z^w_k$ for $k \le 14$ and $h_{15} = \tfrac12\Delta z^w_{15}$.
+The points solved for in a column are $k = k_b, \dots, 15$.
+The step has two parts with different time steps.
+
+\subsubsection*{Dynamic enthalpy, and averaging to the top faces}
+The dynamic enthalpy of tracer cell $(i,j,k)$ is
+\[
+H_{d} = 10^4 \int_0^{|z_k|} \left[ v(S, T, p') - \frac{1}{\rho_0} \right] dp' ,
+\]
+with $v = 1/\rho_\text{TEOS}$ the specific volume of the equation of state of Section~\ref{sec:mom_discrete} (Veros evaluates both with the 48-term TEOS-10 expression), $p'$ in dbar and the factor $10^4$ converting dbar to Pa; $I_T = -(\rho_0/g)\,\partial H_d/\partial T$ and $I_S = -(\rho_0/g)\,\partial H_d/\partial S$ are its analytical derivatives. $H_d$, $I_T$ and $I_S$ at level $n+1$ are computed with $\rho$ and $N^2$ at the end of the temperature step (Section~\ref{sec:coefficients}).
+
+A source $d_k$ computed at the tracer levels $k = k_b, \dots, 15$ of a column is moved to the top faces by
+\[
+(\mathcal{W}d)_k = \tfrac12\left( d_k + d_{k+1} \right) + \delta_{k,k_b}\,\tfrac12\, d_{k_b}\,\frac{\Delta z^w_{k_b-1}}{\Delta z^w_{k_b}}, \quad k_b \le k \le 14,
+\qquad
+(\mathcal{W}d)_{15} = d_{15},
+\]
+with $\Delta z^w_0 = \Delta z^w_1$ and $\mathcal{W}d = 0$ below $k_b$. A source at the $u$ points is moved with the bottom level $\max(k_b(i,j), k_b(i+1,j))$ of the $u$ column and then averaged to the tracer columns as in~\eqref{eq:epsv}, $\tfrac12[(\mathcal{W}d)_{i,j} + (\mathcal{W}d)_{i-1,j}]$; a source at the $v$ points with $\max(k_b(i,j), k_b(i,j+1))$ and $[c^v_j(\mathcal{W}d)_{i,j} + c^v_{j-1}(\mathcal{W}d)_{i,j-1}]/(2c_j)$.
+
+\subsubsection*{Vertical mixing, dissipation and sources: implicit, with $\Delta t_m$}
+With the diffusivity between points $k$ and $k+1$ (at tracer level $k+1$) written
+$\delta_k = \Delta t_m\,\alpha_\text{tke}\,\tfrac12(\kappa_{M,k} + \kappa_{M,k+1})/\Delta z_{k+1}$,
+the model solves in each column the tridiagonal system
+\[
+\left[ 1 + \frac{\delta_k + \delta_{k-1}}{h_k} + \Delta t_m\,c_\varepsilon\,\frac{\sqrt{e^n_k}}{\ell_k} \right] e'_k - \frac{\delta_k}{h_k}\,e'_{k+1} - \frac{\delta_{k-1}}{h_k}\,e'_{k-1}
+= e^n_k + \Delta t_m\,\mathcal{P}_{e,k} + \delta_{k,15}\,\frac{\Delta t_m}{h_{15}}\,F^\text{tke},
+\]
+where the terms in $\delta_k$ are absent at $k=15$ and those in $\delta_{k-1}$ at $k = k_b$.
+The dissipation is linearised as $c_\varepsilon(\sqrt{e^n}/\ell)\,e'$, with $\ell$ and $\sqrt{e^n} = \sqrt{\max(0, e^n)}$ those of Section~\ref{sec:coefficients}, and $\kappa_M$ the bounded viscosity.
+The surface flux is
+\[
+F^\text{tke}_{i,j} = \left[ \left( \frac{\tau^x_{i,j} + \tau^x_{i-1,j}}{2\rho_0} \right)^2 + \left( \frac{\tau^y_{i,j} + \tau^y_{i,j-1}}{2\rho_0} \right)^2 \right]^{3/4}.
+\]
+A negative $e'_{15}$ is set to zero.
+The source $\mathcal{P}_e$ (Section~\ref{sec:tke}) is evaluated from quantities of the current step: $\varepsilon_v$ from this step's friction~\eqref{eq:epsv}; $\mathcal{P}_v$ from $T^{n+1}$, $S^{n+1}$ and $\kappa_H$,
+\[
+\mathcal{P}_{v,k} = -\frac{g}{\rho_0}\, m^w_k\,\kappa_{H,k}\, \frac{(I_{T,k} - I_{T,k+1})(T_{k+1} - T_k) + (I_{S,k} - I_{S,k+1})(S_{k+1} - S_k)}{(\Delta z^w_k)^2}, \quad k \le 14,
+\qquad
+\mathcal{P}_{v,15} = -\frac{g}{\rho_0}\,\frac{2\,I_{T,15}}{\Delta z^w_{15}}\,Q_T ;
+\]
+the eddy dissipation $c^\text{eke}_\varepsilon(\sqrt{E^n}/L)\,E'$ from the $E$ step just completed (Section~\ref{sec:eke_discrete}); and $\mathcal{P}_\text{adv}$ from the advection of $T$, $S$ and of the dynamic enthalpy in this step.
+$\varepsilon_v$, $\mathcal{P}_v$ and the eddy dissipation are already on the top faces. For $\mathcal{P}_\text{adv}$, each tracer cell has
+\[
+\tilde P_k = -\frac{g}{\rho_0}\left[ I_{T,k}\,(\mathsf{M}T^n)_k + I_{S,k}\,(\mathsf{M}S^n)_k \right] - (\mathsf{M}H_d)_k
+- \frac{g}{2\rho_0\,\Delta z_k}\left( w_k\,\bar\rho_k\,\Delta z^w_k + w_{k-1}\,\bar\rho_{k-1}\,\Delta z^w_{k-1} \right),
+\qquad \bar\rho_k = \tfrac12(\rho_k + \rho_{k+1}),
+\]
+with $\mathsf{M}$ the advection matrix of Section~\ref{sec:advection} (built from $u^n$, $v^n$, $w^n$), $I_T$, $I_S$, $H_d$ and the density anomaly $\rho$ of level $n$, $w = w^n$, and $w_{15} = 0$, $w_{k_b-1} = 0$: the change of dynamic enthalpy implied by advecting $T$ and $S$, minus the advection of $H_d$ itself, minus the conversion $-g\rho w/\rho_0$ by vertical advection. Its integral over the ocean is spread uniformly over the top faces where $e^n > 0$ and over every surface point:
+\[
+\mathcal{P}_{\text{adv},k} = \Pi\,[e^n_k > 0] \quad (k \le 14), \qquad \mathcal{P}_{\text{adv},15} = \Pi,
+\qquad
+\Pi = \frac{\sum_{i,j} c_j \left[ \sum_{k=1}^{14} m^w_k\,\Delta z^w_k\,(\mathcal{W}\tilde P)_k + \tfrac12\Delta z^w_{15}\,m_{15}\,(\mathcal{W}\tilde P)_{15} \right]}{\sum_{i,j} c_j \left[ \sum_{k=1}^{14} m^w_k\,\Delta z^w_k\,[e^n_k > 0] + \tfrac12\Delta z^w_{15}\,m_{15} \right]},
+\]
+where $[\cdot]$ is $1$ if the condition holds and $0$ otherwise.
+
+\subsubsection*{Advection: explicit, with $\Delta t$}
+$e$ is advected with a flux-limited (Superbee) scheme by velocities interpolated to its own grid.
+The horizontal velocities at the $e$ points are thickness-weighted averages of the two tracer levels that the control volume overlaps,
+\[
+u^w_{i,j,k} = \frac{m^u_{i,j,k+1}\,u_{i,j,k+1}\,\Delta z_{k+1} + m^u_{i,j,k}\,u_{i,j,k}\,\Delta z_k}{2\,\Delta z^w_k}, \quad k \le 14,
+\qquad
+u^w_{i,j,15} = \frac{m^u_{i,j,15}\,u_{i,j,15}\,\Delta z_{15}}{2\,\Delta z^w_{15}},
+\]
+with the transport of the lower half of level 1 added to $u^w_{i,j,1}$, and with the transport through any face whose control volume is closed on either side moved to the level above; $v^w$ likewise, and $w^w$ from the continuity of $(u^w, v^w)$ summed upward with thicknesses $\Delta z^w_k$. They are computed from $u^n$, $v^n$.
+For a velocity component $c$ normal to a face (with the factor $c^v_j$ included for $v^w$), between a point with value $e$ and the next point with value $e^+$ in the positive direction,
+\[
+F = c\,\tfrac12(e^+ + e) - \tfrac12|c|\left[ (1 - \Psi) + \Psi\,\frac{|c|\,\Delta t}{\Delta} \right] r,
+\qquad r = \mu\,(e^+ - e),
+\qquad \Psi = \max\!\left( 0,\; \min(1, 2R),\; \min(2, R) \right),
+\]
+where $\mu$ is the product of $\hat m^w$ at the two points, $\Delta$ is the grid distance in that direction, and $R$ is the ratio of the upstream difference (the $r$ of the neighbouring face on the side the flow comes from) to $r$.
+The advective tendency is the flux divergence, as in~\eqref{eq:adv_discrete} but with $\hat m^w$ and with $h_k$ in place of $\Delta z_k$, and it is stepped with Adams--Bashforth and the \emph{tracer} time step:
+\[
+e^{n+1} = e' + \Delta t\left[ (1.5+\epsilon_\text{AB})\,\mathcal{A}^{e,n} - (0.5+\epsilon_\text{AB})\,\mathcal{A}^{e,n-1} \right].
+\]
+One model step therefore advances the mixing, dissipation and sources of $e$ by $1800$~s and its advection by $86400$~s.
+
+\subsection{\texorpdfstring{Discretisation of the $E$ equation}{Discretisation of the E equation}}\label{sec:eke_discrete}
+
+The discretisation of the $E$ equation below is transcribed from the source and was not tested by an independent implementation.
+
+$E$ is on the same points as $e$, with the same control volumes $h_k$. All parts use the tracer time step $\Delta t$.
+
+\subsubsection*{Vertical mixing, dissipation and sources: implicit}
+With $\delta_k = \Delta t\,\alpha_\text{eke}\,\tfrac12(\kappa_{M,k} + \kappa_{M,k+1})/\Delta z_{k+1}$ and $\gamma_k = \hat m^w_k\,c^\text{eke}_\varepsilon\,\sqrt{\max(0, E^n_k)}/L_k$ (with $L$ the eddy length scale of Section~\ref{sec:coefficients}),
+\[
+\left[ 1 + \frac{\delta_k + \delta_{k-1}}{h_k} + \Delta t\,\gamma_k \right] E'_k - \frac{\delta_k}{h_k}\,E'_{k+1} - \frac{\delta_{k-1}}{h_k}\,E'_{k-1}
+= E^n_k + \Delta t\,\mathcal{P}_{E,k},
+\]
+with the same end conditions as for $e$ and no surface flux.
+$\gamma_k E'_k$ is the dissipation that is passed to $e$.
+The source $\mathcal{P}_E$ (Section~\ref{sec:eke}) is evaluated in the current step, $\mathcal{P}_E = \mathcal{K}_\text{gm} + \mathcal{K}_h - \mathcal{P}_\text{skew} - \mathcal{P}_\text{iso}$, with the operator $\mathcal{W}$ and $I_T$, $I_S$ of Section~\ref{sec:tke_discrete}:
+\begin{itemize}
+\item $\mathcal{K}_\text{gm}$, the dissipation by the $\kappa_\text{gm}$ friction, is~\eqref{eq:epsv} with $\bar\kappa_\text{gm}$, $u^{\ast\ast}$ in place of $\bar\kappa_M$, $u^\ast$ (the factor $u^n_{k+1}-u^n_k$ is unchanged).
+\item $\mathcal{K}_h$, the dissipation by horizontal friction, is at the $u$ points
+\[
+d^h = \frac{(u_{i+1}-u_i)\,G^e_i + (u_i-u_{i-1})\,G^e_{i-1}}{2\,c_j\,\Delta x} + \frac{(u_{j+1}-u_j)\,G^n_j + (u_j-u_{j-1})\,G^n_{j-1}}{2\,c_j\,\Delta y},
+\]
+with the fluxes $G^e$, $G^n$ of $u$ (Section~\ref{sec:mom_discrete}) and $u = u^n$ (unchanged indices omitted), and at the $v$ points the same with $v$, the fluxes $G^e$, $G^n$ of $v$ and $c^v_j$ in place of $c_j$; both are moved to the top faces with $\mathcal{W}$ and averaged to the tracer columns, and the two are added.
+\item $\mathcal{P}_\text{iso}$ is, for each tracer (the contributions of $T$ and $S$ are added; that of $S$ is zero here), with the Redi fluxes $F^x$, $F^y$, $F^z$ of Section~\ref{sec:iso} computed from $T^n$ and with $I = I_T$ of level $n$,
+\[
+\mathcal{P}_{\text{iso},k} = (\mathcal{W}h)_k - \frac{g}{\rho_0}\,m^w_k\,\frac{I_k - I_{k+1}}{\Delta z^w_k}\left[ F^z_k + K_{33,k}\,\frac{T''_{k+1} - T''_k}{\Delta z^w_k} \right] \quad (k \le 14),
+\qquad
+\mathcal{P}_{\text{iso},15} = (\mathcal{W}h)_{15},
+\]
+\[
+h = \frac{g}{\rho_0}\left[ \frac{(I_{i+1}-I_i)\,F^x_i + (I_i-I_{i-1})\,F^x_{i-1}}{2\,c_j\,\Delta x} + \frac{(I_{j+1}-I_j)\,F^y_j + (I_j-I_{j-1})\,F^y_{j-1}}{2\,c_j\,\Delta y} \right],
+\]
+where $T''$ is the temperature after the Redi step, implicit $K_{33}$ solve included (Section~\ref{sec:iso}); for $S$, $I_S$, $S''$ and the fluxes of $S$ take the places of $I_T$, $T''$ and those of $T$.
+\item $\mathcal{P}_\text{skew}$ is the same with the GM fluxes of Section~\ref{sec:gm} and without the $K_{33}$ term.
+\end{itemize}
+
+\subsubsection*{Horizontal mixing: explicit}
+From $E^n$, with fluxes through the east and north sides of the control volumes,
+\begin{align*}
+F^x_{i,j,k} &= m^u_{i,j,k}\;\tfrac12\max\!\left( 500~\text{m}^2\,\text{s}^{-1},\; K_{\text{gm},i,j,k} + K_{\text{gm},i+1,j,k} \right) \frac{E_{i+1,j,k} - E_{i,j,k}}{c_j\,\Delta x}, \\
+F^y_{i,j,k} &= m^v_{i,j,k}\;c^v_j\;\tfrac12\max\!\left( 500~\text{m}^2\,\text{s}^{-1},\; K_{\text{gm},i,j,k} + K_{\text{gm},i,j+1,k} \right) \frac{E_{i,j+1,k} - E_{i,j,k}}{\Delta y}, \\
+E'' &= E' + \Delta t\;\hat m^w_{i,j,k}\left[ \frac{F^x_{i,j,k} - F^x_{i-1,j,k}}{c_j\,\Delta x} + \frac{F^y_{i,j,k} - F^y_{i,j-1,k}}{c_j\,\Delta y} \right].
+\end{align*}
+The diffusivity is thus the average of the two neighbouring $K_\text{gm}$, bounded below by $250~\text{m}^2\,\text{s}^{-1}$. The masks $m^u$, $m^v$ are those of tracer level $k$.
+
+\subsubsection*{Advection: explicit}
+The same Superbee fluxes and velocities as for $e$, applied to $E^n$, and
+$E^{n+1} = E'' + \Delta t\,[(1.5+\epsilon_\text{AB})\,\mathcal{A}^{E,n} - (0.5+\epsilon_\text{AB})\,\mathcal{A}^{E,n-1}]$.
+
+\section{One model time step, and the model state}\label{sec:step}
+
+\subsection{Order of operations}
+One step takes the state at level $n$ to level $n+1$. In the order in which the model does it:
+\begin{enumerate}
+\item \textbf{Surface forcing} from $T^n$: the heat flux $Q_T$ with its ice mask (Section~\ref{sec:vmix}); the wind stress and the TKE surface flux are constant.
+\item \textbf{Eddy coefficients} $K_\text{gm}$, $\kappa_\text{gm}$ from $E^n$ and $N^2$ of level $n$ (Section~\ref{sec:coefficients}).
+\item \textbf{Vertical coefficients} $\ell$, $\kappa_M$, $\kappa_H$ from $e^n$, $N^2$ of level $n$ and the $\varepsilon_v$ stored by the previous step.
+\item \textbf{Momentum} (Sections~\ref{sec:mom_discrete} to~\ref{sec:mom_time}): tendencies from $u^n$, $v^n$, $w^n$ and $\rho^n$; friction, which also stores the new $\varepsilon_v$; the streamfunction; $u^{n+1}$, $v^{n+1}$, $\psi^{n+1}$, over $\Delta t_m = 1800$~s.
+\item \textbf{Temperature and salinity} over $\Delta t = 86400$~s, each part acting on the result of the one before: advection by $u^n$, $v^n$, $w^n$ with Adams--Bashforth~\eqref{eq:ab2}; isoneutral diffusion, explicit part then implicit $K_{33}$ (Section~\ref{sec:iso}); GM (Section~\ref{sec:gm}); implicit vertical mixing with the surface flux (Section~\ref{sec:vmix}). The slopes, tapers and all explicit tendencies are evaluated from $T^n$, $S^n$.
+\item \textbf{Equation of state} at level $n+1$: $\rho$, $N^2$, the dynamic enthalpy and $I_T$, $I_S$ from $T^{n+1}$, $S^{n+1}$.
+\item \textbf{$E$}, then \textbf{$e$} (Sections~\ref{sec:eke_discrete},~\ref{sec:tke_discrete}), with the sources computed in items 4 to 6.
+\item \textbf{$w^{n+1}$} from $u^{n+1}$, $v^{n+1}$ (Section~\ref{sec:mom_time}).
+\end{enumerate}
+Consequences of this order:
+\begin{itemize}
+\item One step advances the tracers and $E$ by one day and the velocities and $\psi$ by half an hour (and $e$ partly by each, Section~\ref{sec:tke_discrete}). Model time is counted in tracer time steps. The ratio of 48 slows the adjustment of the velocity to a given density field by that factor relative to the tracers.
+\item During the temperature step the velocities and all mixing coefficients are those of level $n$: within a step the temperature equation is linear in $T^{n+1}$, with every coefficient a function of the state at level $n$ (and, for $\kappa_H$ through $\varepsilon_v$, of the step before).
+\item The coefficients respond to a change of temperature in two stages: immediately, through $N^2$ (and the slopes), with $e$ and $E$ unchanged; and then slowly, as $e$ and $E$ themselves adjust.
+\end{itemize}
+
+\subsection{The model state}
+The fields that define the state at a time level, and that a restart file holds, are listed below. Veros keeps three time levels of each time-stepped array ($n-1$, $n$, $n+1$) and rotates their roles after every step.
+\begin{center}
+\small
+\begin{tabular}{lll}
+\hline
+Field & Veros name & Remarks \\
+\hline
+$T$, $S$ & \texttt{temp}, \texttt{salt} & \\
+$u$, $v$, $w$ & \texttt{u}, \texttt{v}, \texttt{w} & $w$ is diagnostic but stored (used by advection) \\
+$\psi$ & \texttt{psi} & \\
+$e$, $E$ & \texttt{tke}, \texttt{eke} & \\
+$\mathcal{A}^{T}$, $\mathcal{A}^{S}$ & \texttt{dtemp}, \texttt{dsalt} & advective tendencies, for Adams--Bashforth~\eqref{eq:ab2} \\
+$\mathcal{A}^{u}$, $\mathcal{A}^{v}$ & \texttt{du}, \texttt{dv} & Section~\ref{sec:mom_time} \\
+$\chi$, $\dot\psi_n$ & \texttt{dpsi}, \texttt{dpsin} & Section~\ref{sec:mom_time} \\
+$\mathcal{A}^{e}$, $\mathcal{A}^{E}$ & \texttt{dtke}, \texttt{deke} & advective tendencies \\
+$\rho$, $N^2$ & \texttt{rho}, \texttt{Nsqr} & functions of $T$, $S$ of the same level \\
+$H_d$, $I_T$, $I_S$ & \texttt{Hd}, \texttt{int\_drhodT}, \texttt{int\_drhodS} & functions of $T$, $S$; and \texttt{dHd}, the advective tendency of $H_d$ \\
+$\varepsilon_v$ & \texttt{K\_diss\_v} & from the friction of the previous step \\
+\hline
+\end{tabular}
+\end{center}
+The mixing coefficients $\kappa_H$, $\kappa_M$, $K_\text{gm}$, $\kappa_\text{gm}$, the slopes and the surface heat flux are not part of the state: they are recomputed from it at the start of every step.
+
+A state is more than $(T, u, v, \psi, e, E)$. If the temperature of a state is replaced, then $\rho$, $N^2$, $H_d$, $I_T$ and $I_S$ have to be recomputed from it at every stored time level, or the first step uses the density and the stratification of the old temperature. If the velocities are replaced, $\psi$ has to be made consistent with them through~\eqref{eq:psi_transport} and $w$ through continuity. And because every Adams--Bashforth term of the first step is $(1.5+\epsilon_\text{AB})\,\mathcal{A}^{n} - (0.5+\epsilon_\text{AB})\,\mathcal{A}^{n-1}$, the stored tendencies of the previous step enter the first step with weight $-0.6$: unless they are replaced by the tendencies of the new state, the first step is driven in part by tendencies of the old one.
+
+\begin{thebibliography}{9}
+\bibitem{redi1982} Redi, M.~H., 1982: Oceanic isopycnal mixing by coordinate rotation. \textit{J. Phys. Oceanogr.}, \textbf{12}, 1154--1158. \url{https://doi.org/10.1175/1520-0485(1982)012<1154:OIMBCR>2.0.CO;2}
+\bibitem{gentmcwilliams1990} Gent, P.~R., McWilliams, J.~C., 1990: Isopycnal mixing in ocean circulation models. \textit{J. Phys. Oceanogr.}, \textbf{20}, 150--155. \url{https://doi.org/10.1175/1520-0485(1990)020<0150:IMIOCM>2.0.CO;2}
+\bibitem{gent1995} Gent, P.~R., Willebrand, J., McDougall, T.~J., McWilliams, J.~C., 1995: Parameterizing eddy-induced tracer transports in ocean circulation models. \textit{J. Phys. Oceanogr.}, \textbf{25}, 463--474. \url{https://doi.org/10.1175/1520-0485(1995)025<0463:PEITTI>2.0.CO;2}
+\bibitem{griffies1998} Griffies, S.~M., Gnanadesikan, A., Pacanowski, R.~C., Larichev, V.~D., Dukowicz, J.~K., Smith, R.~D., 1998: Isoneutral diffusion in a $z$-coordinate ocean model. \textit{J. Phys. Oceanogr.}, \textbf{28}, 805--830. \url{https://doi.org/10.1175/1520-0485(1998)028<0805:IDIAZC>2.0.CO;2}
+\bibitem{bryanlewis1979} Bryan, K., Lewis, L.~J., 1979: A water mass model of the world ocean. \textit{J. Geophys. Res.}, \textbf{84}, 2503--2517. \url{https://doi.org/10.1029/JC084iC05p02503}
+\bibitem{teos10} IOC, SCOR, IAPSO, 2010: The international thermodynamic equation of seawater -- 2010: Calculation and use of thermodynamic properties. Intergovernmental Oceanographic Commission, Manuals and Guides No.~56, UNESCO. \url{https://doi.org/10.25607/OBP-1338}
+\bibitem{godfrey1989} Godfrey, J.~S., 1989: A Sverdrup model of the depth-integrated flow for the world ocean allowing for island circulations. \textit{Geophys. Astrophys. Fluid Dyn.}, \textbf{45}, 89--112. \url{https://doi.org/10.1080/03091928908208894}
+\end{thebibliography}
+
+\end{document}
