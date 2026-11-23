@@ -11,7 +11,7 @@ We use the method put forward in [Cooper (2017)](#references) and adapted for th
 The changes here include:
 
 - Unlike in Cooper (2017), here the temperature feeds back strongly onto the velocity. As suggested in that paper, this was handled by inclusion of a linear equation for velocity, instantaneously slaved to the temperature.
-- The equilibrium solve used LU factorisation (affordable at 4°) instead of Bi-CGSTAB (used in Cooper 2017 for higher resolution), combined with implicit pseudo-time stepping (Kelley and Keyes, 1998) of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
+- The equilibrium solve used LU factorisation (affordable at 4°) instead of Bi-CGSTAB (used in Cooper 2017 for higher resolution), combined with implicit pseudo-time stepping [(Kelley and Keyes, 1998)](#references) of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
 - At 4° resolution eddies are not resolved, enabling use of a linear equation for velocity. In an eddying flow, as in Cooper (2017), time mean equations need to be used.
 
 ## Results
@@ -56,3 +56,4 @@ The effort involved in all of these tasks was substantially reduced through the 
 ## References
 
 Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. *Ocean Modelling*, **120**, 79–82. <https://doi.org/10.1016/j.ocemod.2017.10.008>
+- Kelley, C. T., Keyes, D. E., 1998: Convergence analysis of pseudo-transient continuation. *SIAM J. Numer. Anal.*, **35**, 508–523. [doi:10.1137/S0036142996304796](https://doi.org/10.1137/S0036142996304796)
