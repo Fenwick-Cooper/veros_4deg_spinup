@@ -43,11 +43,13 @@ The changes here include:
 \begin{tabular}{l|p{2.4cm}|p{2.4cm}|p{2.2cm}}
 Method & Model day that score $< 10^{-5}$ & Wall-clock time \newline (Apple M3 Pro) & RMS distance to $T_{2000}$ \\ 
 \hline
-Veros 3714 day run & 3714 & 2.5 minutes & 0.65 $^{\text{o}}$C \\  
+Veros 3714 day run & 3714 & 2.2 minutes & 0.65 $^{\text{o}}$C \\  
 Veros 200 year run & - & 37 minutes & 0.21 $^{\text{o}}$C \\
 Veros 1000 year run & - & $\sim3$ hours & 0.05 $^{\text{o}}$C \\
 Competition spin-up & 63 & 10 minutes & 0.06 $^{\text{o}}$C \\
 Equilibrium spin-up & 93 & 13 minutes & 0.05 $^{\text{o}}$C \\
+Anderson acceleration & 3420 & 1.9 minutes & 0.67 $^{\text{o}}$C \\
+Newton--Krylov & 2025 & 40 minutes & 0.57 $^{\text{o}}$C \\
 \end{tabular}
 \end{center}
 {\bf Competition spin-up:} Veros is run for 10 days followed by a round of implicit time stepping. This is repeated four times and then Veros is run until the score $<10^{-5}$. {\bf Equilibrium spin-up:} The same but with Veros run for 20 days between four rounds of implicit time stepping. $T_{2000}$ is the model temperature at the end of a 2000 year integration.
@@ -68,7 +70,7 @@ To run the ``Equilibrium spin-up'' method run \texttt{python equilibrium\_spin-u
 
 \section*{Note}
 
-Creating the exact sparse matrices specific to each term in an ocean model is labour intensive. However, AI assistants can now automate this step and it is relatively easy to check that a matrix is correct. Once the matrices have been extracted, it is much easier to play around with various time-stepping schemes. We first used Claude to reverse engineer and document the precise Veros integration scheme (\texttt{veros\_discretisation.pdf}). Then after preliminary tests established that the velocity must respond to the temperature during the solve (\texttt{equilibration\_experiments.pdf}), we applied the technique to Veros (see \texttt{coupled\_spinup.pdf} for a detailed write-up).
+Creating the exact sparse matrices specific to each term in an ocean model is labour intensive. However, AI assistants can now automate this step and it is relatively easy to check that a matrix is correct. Once the matrices have been extracted, it is much easier to play around with various time-stepping schemes. We first used Claude to reverse engineer and document the precise Veros integration scheme (\texttt{veros\_discretisation.pdf}). Then after preliminary tests established that the velocity must respond to the temperature during the solve (\texttt{equilibration\_experiments.pdf}), we applied the technique to Veros (see \texttt{coupled\_spinup.pdf} for a detailed write-up). Finally we tested against basic Anderson acceleration and Newton--Krylov methods (\texttt{method\_comparison.pdf}).
 
 \begin{center}
 \begin{tabular}{ll}
@@ -77,6 +79,7 @@ File & Description \\
 \texttt{Description/veros\_discretisation.pdf} & Veros's precise numerical scheme. \\
 \texttt{Description/equilibration\_experiments.pdf} & Initial experiments. \\
 \texttt{Description/coupled\_spinup.pdf} & Detailed documentation of the method and the results. \\
+\texttt{Description/method\_comparison.pdf} & Test against Anderson and Newton--Krylov. \\
 \texttt{competition\_spin-up.py} & Spin up Veros in 63 days. \\
 \texttt{equilibrium\_spin-up.py} & Spin up Veros close to equilibrium. \\
 \end{tabular}
@@ -90,16 +93,3 @@ The effort involved in all of these tasks was substantially reduced through the 
 \end{thebibliography}
 
 \end{document}
-
-
-
-
-
-Todo:
-	Create the repo and upload.
-	Test the spin-up scripts
-	Send the entry email
-
-
-
-

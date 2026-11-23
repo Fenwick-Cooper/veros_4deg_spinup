@@ -1,0 +1,112 @@
+\documentclass{article}
+    % General document formatting
+    \usepackage[margin=0.7in]{geometry}
+    \usepackage[parfill]{parskip}
+    \usepackage[utf8]{inputenc}
+
+    % Related to math
+    \usepackage{amsmath,amssymb,amsfonts,amsthm}
+
+    % Others
+    \usepackage{graphicx}
+    \usepackage[square,numbers]{natbib}
+    \usepackage{url}
+    \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+    \usepackage{xcolor}
+    % \chg{} marks changes in red
+    \newcommand{\chg}[1]{{\color{red}#1}}
+\title{Veros $4^{\text{o}}$ ocean spin-up: comparison with Anderson acceleration and Newton--Krylov}
+\author{Fenwick C. Cooper$^1$}
+\date{%
+    $^1$University of Oxford, UK \\[2ex]
+    \today
+}
+\begin{document}
+\maketitle
+
+This document, and the code and computations it reports, were produced almost entirely by the AI assistant Claude, following the human author's instructions over several iterations. The human author reviewed the text for clarity, relevance and quality, and takes responsibility for its content. Everything is specific to the setup in \url{https://past2future.org/2026/09/11/ocean-model-spin-up-competition/}.
+
+We compare our spin-up method, which we call \emph{leap-and-settle}, with two general-purpose accelerators that have been used to spin up ocean and Earth system models: Anderson acceleration \cite{walkerni2011,khatiwala2024} and Newton--Krylov \cite{knollkeyes2004,merliskhatiwala2008,bernsen2008}. We also test Anderson acceleration applied on top of leap-and-settle. For each method we ask how many model days, and how much wall-clock time, it takes to meet the competition criterion and to reach the spun-up state.
+
+\section*{Methods}
+
+\textbf{Leap-and-settle} \cite{Cooper2017}, described in detail in \texttt{coupled\_spinup.pdf}, works in rounds. Each round has two parts:
+\begin{itemize}
+\item \emph{Settle:} Veros runs for a few days. This brings the circulation, the turbulence energies and the fast modes into balance with the temperature.
+\item \emph{Leap:} the temperature tendency, with the velocity slaved to the temperature through a linear momentum equation, is marched by linearly implicit pseudo-time steps \cite{kelleykeyes1998} through tens to thousands of pseudo-years. The result is patched into Veros.
+\end{itemize}
+We use four configurations:
+\begin{itemize}
+\item \textbf{L3} (competition spin-up): four rounds, each 10 Veros days followed by a leap of 30, 60, 60 and 2000 pseudo-years.
+\item \textbf{L2} (equilibrium spin-up): the same with 20 Veros days per round.
+\item \textbf{L3 + 3 long rounds:} L3 followed by three more rounds of 10 Veros days and a 2000 pseudo-year leap.
+\item \textbf{L3 + 3 long rounds with Anderson acceleration over the rounds:} as above, but from the fourth round on, the temperature patched in after a round is the Anderson mixture (below) of the rounds so far, with memory 3.
+\end{itemize}
+
+\textbf{Anderson acceleration on Veros alone} \cite{walkerni2011,khatiwala2024}. Spin-up can be written as a fixed-point iteration, $x_{k+1}=f(x_k)$, where the map $f$ runs the model forward from the state $x_k$ for a fixed time. The equilibrium is the state that $f$ leaves unchanged, $f(x)=x$. The successive states $x_0, x_1, x_2, \dots$ are the \emph{iterates}, and the \emph{residual} $g_k = f(x_k)-x_k$ is how far one application of $f$ moves the iterate $x_k$; it is zero only at equilibrium. Plain integration takes $x_{k+1}=f(x_k)$. Anderson acceleration also uses the last $m$ iterates and residuals: it finds the combination of the recent steps that, extrapolated linearly, makes the residual smallest, and jumps there:
+\[
+x_{k+1} = x_k + g_k - (\Delta X_k + \Delta G_k)\,\gamma_k, \qquad \gamma_k = \arg\min_\gamma \lVert g_k - \Delta G_k\gamma\rVert,
+\]
+where the columns of $\Delta X_k$ and $\Delta G_k$ are the changes from one iterate to the next, and from one residual to the next, over the last $m$ iterations. With $m=0$ it is plain integration. On Veros alone, $f$ patches the ocean temperature $x$ into Veros and runs Veros for one model year, and $m=10$. The step beyond $f(x_k)$ was limited to $5\,^{\text{o}}$C in any cell. Only the temperature is patched: the density, $N^2$ and the time-stepping tendencies follow it, but the circulation is the one Veros has. Over the leap-and-settle rounds (above), $x$ is the temperature at the start of a round and $f(x)$ is the temperature at the end of its leap.
+
+\textbf{Newton--Krylov on Veros alone} \cite{knollkeyes2004,merliskhatiwala2008,bernsen2008}. The residual is $G(T)=[\Phi(T)-T]/\tau$, where $\Phi$ is one model year ($\tau = 360$ days) of Veros started from temperature $T$. Each step solves
+\[
+\left(J - \frac{I}{\Delta t}\right)\delta = -G(T), \qquad J = \frac{\partial G}{\partial T},
+\]
+with up to 20 GMRES iterations \cite{saadschultz1986} and no preconditioner, then sets $T \leftarrow T+\delta$. The pseudo-time step $\Delta t$ starts at 10 years and doubles every step, and $\delta$ is scaled down if it changes any cell by more than $3\,^{\text{o}}$C. Each product $Jv$ is the exact derivative of a one-year Veros run, computed by forward-mode automatic differentiation (JAX) through the model; each costs one model year. Finite-difference products cannot be used, because convection switching on and off makes them wrong by 1--50\%.
+
+\textbf{Measures.} The distance from equilibrium is the RMS difference over all ocean cells between the model temperature and $T_{2000}$, the temperature at the end of a 2000 year Veros integration. Wall-clock times are for the whole run, from starting the program to the end, including model start-up and compilation, with Veros's output switched off in every run. Plain Veros runs at 0.030 seconds per model day after about 17 seconds of start-up, so the 3714 days to the competition criterion take 2.2 minutes (2.3 minutes with Veros's usual output on). The wall-clock times of the conventional curve are computed from these two numbers. The Newton--Krylov run needs a differentiable configuration of Veros, which runs at about 0.05 seconds per day. Anderson and Newton--Krylov on Veros alone were stopped after one hour.
+
+\section*{Results}
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=\textwidth]{comparison_without_C.png}
+\end{center}
+\caption{RMS distance to $T_{2000}$ against Veros days integrated (left) and wall-clock time (Apple M3 Pro) (right). Dots mark where each method first meets the competition criterion (open dots: L2). The black line is a conventional Veros integration. L3 and the two ``L3 + 3 long rounds'' runs are the same up to day 40, and the plain and Anderson versions of the latter agree to within $0.0005\,^{\text{o}}$C, so they are drawn on top of one another.}
+\label{fig:comparison}
+\end{figure}
+
+\begin{center}
+\begin{tabular}{l|p{2.6cm}|p{1.7cm}|p{2.8cm}|p{2.8cm}}
+Method & Score $<10^{-5}$: Veros days / wall-clock & Distance at that point & Reach $0.06\,^{\text{o}}$C: Veros days / wall-clock & Reach $0.05\,^{\text{o}}$C: Veros days / wall-clock \\
+\hline
+Conventional Veros & 3714 / 2.2 min & 0.65 $^{\text{o}}$C & 870 years / 2.7 h & 970 years / 3.0 h \\
+Leap-and-settle, L3 & 63 / 10 min & 0.060 $^{\text{o}}$C & 67 / 10 min & -- \\
+Leap-and-settle, L2 & 93 / 13 min & 0.048 $^{\text{o}}$C & 81 / 13 min & 81 / 13 min \\
+L3 + 3 long rounds & 78 / 17 min & 0.043 $^{\text{o}}$C & 51 / 12 min & 51 / 12 min \\
+\quad with Anderson over rounds & 78 / 17 min & 0.043 $^{\text{o}}$C & 51 / 12 min & 51 / 12 min \\
+Anderson, Veros alone & 3420 / 1.9 min & 0.67 $^{\text{o}}$C & not reached$^a$ & not reached \\
+Newton--Krylov, Veros alone & 26\,145$^b$ / 40 min & 0.57 $^{\text{o}}$C & not reached$^c$ & not reached \\
+\end{tabular}
+\end{center}
+{\small $^a$0.25 $^{\text{o}}$C after 300 years (53 min); conventional Veros is at 0.17 $^{\text{o}}$C after 300 years. $^b$Day 2025 of the model trajectory; the rest are the derivative runs. $^c$0.44 $^{\text{o}}$C after 41\,040 Veros days (63 min); conventional Veros is at 0.25 $^{\text{o}}$C after the same number of days and 0.15 $^{\text{o}}$C after the same wall-clock time.}
+
+\begin{itemize}
+\item \textbf{Spun-up state.} Leap-and-settle is the only method that gets near equilibrium. It reaches $0.06\,^{\text{o}}$C in 10 minutes and $0.05\,^{\text{o}}$C in 12--13 minutes, against 2.7 and 3.0 hours for conventional Veros (13--16$\times$ faster), and uses over 4000 times fewer model days. Almost all of its wall-clock time is spent in the leaps; its 60--110 Veros days take 2--4 seconds.
+\item \textbf{Competition criterion.} In model days leap-and-settle meets the criterion 60 times sooner. In wall-clock time conventional Veros meets it sooner, 2.2 minutes against 10. Every method that runs Veros for long enough meets the criterion after 6--10 model years, whatever its distance from equilibrium (0.57--0.67 $^{\text{o}}$C), so the criterion says little about spin-up.
+\item \textbf{Extra rounds, and Anderson acceleration over the rounds.} Three more long rounds reduce the distance from 0.060 to 0.043 $^{\text{o}}$C, but the rounds settle within two (0.061, 0.048, 0.043, 0.043 $^{\text{o}}$C). Anderson acceleration changes nothing. The rounds converge to a fixed point that lies 0.043 $^{\text{o}}$C from $T_{2000}$, offset by the difference between the linear model used in the leap and Veros. Anderson acceleration speeds convergence to a fixed point but cannot move it.
+\item \textbf{Anderson acceleration on Veros alone} does worse than plain Veros. A likely reason is that the slow deep modes, with e-folding times of centuries, change very little in one model year, so they are barely visible in the residual $g_k$, which is dominated by faster adjustment. Patching temperature alone, without a matching circulation, may also cost part of each year in readjustment.
+\item \textbf{Newton--Krylov on Veros alone} does worse still per unit of cost. Without a preconditioner, 10--20 GMRES iterations only reduce the linear residual to 0.1--0.4 of its starting value, and each iteration costs a model year, so one Newton step costs 10--20 years of model time.
+\end{itemize}
+
+\section*{Variants not shown}
+
+Two further variants of leap-and-settle were run but are left out of the figure. In both, the leap marches Veros's own one-day residual instead of the linear model's tendency, with the linear model used as a preconditioner. Without Krylov iterations (defect correction) this gives $0.067\,^{\text{o}}$C in 9.6 minutes, no better than L3, and its patched state is noisier, so the criterion is met later (day 122). With 5 GMRES iterations using exact derivatives it fails: half of the steps are rejected and the run ends $0.59\,^{\text{o}}$C from $T_{2000}$.
+
+\section*{Code}
+
+The scripts and a README are in \texttt{code/newton\_krylov\_anderson}. There \texttt{run\_all.sh} runs every method one after another, then the conventional Veros timings, and writes the table; \texttt{plot\_compare.py} draws the figure. They need the 2000-year reference run (\texttt{code/run\_2000yr\_reference.py}).
+
+\begin{thebibliography}{9}
+\bibitem{Cooper2017} Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. \textit{Ocean Modelling}, \textbf{120}, 79--82. \url{https://doi.org/10.1016/j.ocemod.2017.10.008}
+\bibitem[Kelley and Keyes(1998)]{kelleykeyes1998} Kelley, C.~T., Keyes, D.~E., 1998: Convergence analysis of pseudo-transient continuation. \textit{SIAM J. Numer. Anal.}, \textbf{35}, 508--523. \href{https://doi.org/10.1137/S0036142996304796}{doi:10.1137/S0036142996304796}
+\bibitem{walkerni2011} Walker, H.~F., Ni, P., 2011: Anderson acceleration for fixed-point iterations. \textit{SIAM J. Numer. Anal.}, \textbf{49}, 1715--1735.
+\bibitem{khatiwala2024} Khatiwala, S., 2024: Efficient spin-up of Earth System Models using sequence acceleration. \textit{Science Advances}, \textbf{10}, eadn2839.
+\bibitem{knollkeyes2004} Knoll, D.~A., Keyes, D.~E., 2004: Jacobian-free Newton--Krylov methods: a survey of approaches and applications. \textit{J. Comput. Phys.}, \textbf{193}, 357--397.
+\bibitem{merliskhatiwala2008} Merlis, T.~M., Khatiwala, S., 2008: Fast dynamical spin-up of ocean general circulation models using Newton--Krylov methods. \textit{Ocean Modelling}, \textbf{21}, 97--105.
+\bibitem{bernsen2008} Bernsen, E., Dijkstra, H.~A., Wubs, F.~W., 2008: A method to reduce the spin-up time of ocean models. \textit{Ocean Modelling}, \textbf{20}, 380--392.
+\bibitem{saadschultz1986} Saad, Y., Schultz, M.~H., 1986: GMRES: a generalized minimal residual algorithm for solving nonsymmetric linear systems. \textit{SIAM J. Sci. Stat. Comput.}, \textbf{7}, 856--869.
+\end{thebibliography}
+
+\end{document}

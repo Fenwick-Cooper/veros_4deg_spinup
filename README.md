@@ -11,18 +11,20 @@ We use the method put forward in [Cooper (2017)](#references) and adapted for th
 The changes here include:
 
 - Unlike in Cooper (2017), here the temperature feeds back strongly onto the velocity. As suggested in that paper, this was handled by inclusion of a linear equation for velocity, instantaneously slaved to the temperature.
-- The equilibrium solve used LU factorisation (affordable at 4°) instead of Bi-CGSTAB (used in Cooper (2017) for higher resolution), combined with implicit pseudo-time stepping [(Kelley and Keyes, 1998)](#references) of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
+- The equilibrium solve used LU factorisation (affordable at 4°) instead of Bi-CGSTAB (used in Cooper 2017 for higher resolution), combined with implicit pseudo-time stepping (Kelley and Keyes, 1998) of a simplified non-linear analogue of Veros with fixed turbulence energy fields.
 - At 4° resolution eddies are not resolved, enabling use of a linear equation for velocity. In an eddying flow, as in Cooper (2017), time mean equations need to be used.
 
 ## Results
 
 | Method | Model day that score < 10⁻⁵ | Wall-clock time (Apple M3 Pro) | RMS distance to T<sub>2000</sub> |
 |---|---|---|---|
-| Veros 3714 day run | 3714 | 2.5 minutes | 0.65 °C |
+| Veros 3714 day run | 3714 | 2.2 minutes | 0.65 °C |
 | Veros 200 year run | - | 37 minutes | 0.21 °C |
-| Veros 1000 year run | - | ~3 hours | 0.05 °C |
+| Veros 1000 year run | - | \~3 hours | 0.05 °C |
 | Competition spin-up | 63 | 10 minutes | 0.06 °C |
 | Equilibrium spin-up | 93 | 13 minutes | 0.05 °C |
+| Anderson acceleration | 3420 | 1.9 minutes | 0.67 °C |
+| Newton–Krylov | 2025 | 40 minutes | 0.57 °C |
 
 **Competition spin-up:** Veros is run for 10 days followed by a round of implicit time stepping. This is repeated four times and then Veros is run until the score < 10⁻⁵. **Equilibrium spin-up:** The same but with Veros run for 20 days between four rounds of implicit time stepping. T<sub>2000</sub> is the model temperature at the end of a 2000 year integration.
 
@@ -38,19 +40,19 @@ To run the "Equilibrium spin-up" method run `python equilibrium_spin-up.py`. The
 
 ## Note
 
-Creating the exact sparse matrices specific to each term in an ocean model is labour intensive. However, AI assistants can now automate this step and it is relatively easy to check that a matrix is correct. Once the matrices have been extracted, it is much easier to play around with various time-stepping schemes. We first used Claude to reverse engineer and document the precise Veros integration scheme (`veros_discretisation.pdf`). Then after preliminary tests established that the velocity must respond to the temperature during the solve (`equilibration_experiments.pdf`), we applied the technique to Veros (see `coupled_spinup.pdf` for a detailed write-up).
+Creating the exact sparse matrices specific to each term in an ocean model is labour intensive. However, AI assistants can now automate this step and it is relatively easy to check that a matrix is correct. Once the matrices have been extracted, it is much easier to play around with various time-stepping schemes. We first used Claude to reverse engineer and document the precise Veros integration scheme ([`veros_discretisation.pdf`](Description/veros_discretisation.pdf)). Then after preliminary tests established that the velocity must respond to the temperature during the solve ([`equilibration_experiments.pdf`](Description/equilibration_experiments.pdf)), we applied the technique to Veros (see [`coupled_spinup.pdf`](Description/coupled_spinup.pdf) for a detailed write-up). Finally we tested against basic Anderson acceleration and Newton–Krylov methods ([`method_comparison.pdf`](Description/method_comparison.pdf)).
 
 | File | Description |
 |---|---|
-| `Description/veros_discretisation.pdf` | Veros's precise numerical scheme. |
-| `Description/equilibration_experiments.pdf` | Initial experiments. |
-| `Description/coupled_spinup.pdf` | Detailed documentation of the method and the results. |
-| `competition_spin-up.py` | Spin up Veros in 63 days. |
-| `equilibrium_spin-up.py` | Spin up Veros close to equilibrium. |
+| [`Description/veros_discretisation.pdf`](Description/veros_discretisation.pdf) | Veros's precise numerical scheme. |
+| [`Description/equilibration_experiments.pdf`](Description/equilibration_experiments.pdf) | Initial experiments. |
+| [`Description/coupled_spinup.pdf`](Description/coupled_spinup.pdf) | Detailed documentation of the method and the results. |
+| [`Description/method_comparison.pdf`](Description/method_comparison.pdf) | Test against Anderson and Newton–Krylov. |
+| [`competition_spin-up.py`](competition_spin-up.py) | Spin up Veros in 63 days. |
+| [`equilibrium_spin-up.py`](equilibrium_spin-up.py) | Spin up Veros close to equilibrium. |
 
 The effort involved in all of these tasks was substantially reduced through the use of Claude; however, we directed the work, maintained oversight, understand what we are doing, have read and revised the documents many times and have checked the main results independently. This document was written by a human and checked for errors by Claude.
 
 ## References
 
-- Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. *Ocean Modelling*, **120**, 79–82. <https://doi.org/10.1016/j.ocemod.2017.10.008>
-- Kelley, C. T., Keyes, D. E., 1998: Convergence analysis of pseudo-transient continuation. *SIAM J. Numer. Anal.*, **35**, 508–523. [doi:10.1137/S0036142996304796](https://doi.org/10.1137/S0036142996304796)
+Cooper, F. C., 2017: A potential method to accelerate spin up of turbulent ocean models. *Ocean Modelling*, **120**, 79–82. <https://doi.org/10.1016/j.ocemod.2017.10.008>
