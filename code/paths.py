@@ -32,6 +32,10 @@ REFERENCE_RESTART_DIR = os.path.join(RESTART_DIR, "reference_2000yr")  # referen
 T200_FILE = os.path.join(REFERENCE_RESTART_DIR, "reference_y0200.restart.h5")
 T2000_FILE = os.path.join(REFERENCE_RESTART_DIR, "reference_y2000.restart.h5")
 
+# the same run in single precision (run_2000yr_reference.py --float32; Description/single_precision_spinup.tex)
+REFERENCE_FLOAT32_DIR = os.path.join(INTERMEDIATE_DIR, "reference_2000yr_float32")  # daily.csv, snapshots/, comparison.npz
+REFERENCE_FLOAT32_RESTART_DIR = os.path.join(RESTART_DIR, "reference_2000yr_float32")
+
 
 def make_dirs():
     for d in (INTERMEDIATE_DIR, RESTART_DIR, PLOTS_DIR):

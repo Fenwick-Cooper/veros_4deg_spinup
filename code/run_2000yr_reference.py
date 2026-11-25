@@ -22,6 +22,12 @@ continues from the last checkpoint, losing at most 10 years of computing (about
 Apple M3 Pro; on a Mac, run it under `caffeinate -i` so that the computer does not sleep:
     caffeinate -i python code/run_2000yr_reference.py
 
+--float32 runs the same in single precision (Description/single_precision_spinup.tex),
+with output in data/intermediate/reference_2000yr_float32/ and
+data/veros_restart/reference_2000yr_float32/. It sets VEROS_FLOAT_TYPE=float32 and
+VEROS_USE_SPECIAL_TDMA=0, because Veros's compiled tridiagonal solver rejects single
+precision. compare_2000yr_float32.py and plot_2000yr_float32.py compare the two runs.
+
 Options for testing: --years, --checkpoint-days, --keep-days.
 """
 
@@ -37,7 +43,13 @@ DAYS_PER_YEAR = 360
 
 sys.path.insert(0, HERE)
 
-from paths import INIT_FILE, REFERENCE_DIR, REFERENCE_RESTART_DIR  # noqa: E402
+# single precision must be chosen before anything imports veros
+FLOAT32 = "--float32" in sys.argv[1:]
+if FLOAT32:
+    os.environ["VEROS_FLOAT_TYPE"] = "float32"
+    os.environ["VEROS_USE_SPECIAL_TDMA"] = "0"
+
+from paths import INIT_FILE, REFERENCE_DIR, REFERENCE_FLOAT32_DIR, REFERENCE_FLOAT32_RESTART_DIR, REFERENCE_RESTART_DIR  # noqa: E402
 from veros_path import ensure_veros  # noqa: E402
 
 ensure_veros()
@@ -62,13 +74,14 @@ def main():
     ap.add_argument("--years", type=float, default=2000)
     ap.add_argument("--checkpoint-days", type=int, default=10 * DAYS_PER_YEAR)
     ap.add_argument("--keep-days", type=int, default=100 * DAYS_PER_YEAR)
+    ap.add_argument("--float32", action="store_true", help="single precision (see above)")
     args = ap.parse_args()
     last_day = int(round(args.years * DAYS_PER_YEAR))
-    out = REFERENCE_DIR
+    out, restart_dir = (REFERENCE_FLOAT32_DIR, REFERENCE_FLOAT32_RESTART_DIR) if args.float32 else (REFERENCE_DIR, REFERENCE_RESTART_DIR)
     os.makedirs(os.path.join(out, "snapshots"), exist_ok=True)
-    os.makedirs(REFERENCE_RESTART_DIR, exist_ok=True)
+    os.makedirs(restart_dir, exist_ok=True)
     csv_path = os.path.join(out, "daily.csv")
-    checkpoint = os.path.join(REFERENCE_RESTART_DIR, "checkpoint.restart.h5")
+    checkpoint = os.path.join(restart_dir, "checkpoint.restart.h5")
     day_file = os.path.join(out, "checkpoint.day")
     log = open(os.path.join(out, "run.log"), "a", buffering=1)
 
@@ -95,6 +108,7 @@ def main():
     model = setup_model(identifier, start_file, last_day - day, snap_out_freq=86400.0 * 1e7)
     state = model.state
     vs = state.variables
+    say(f"precision {vs.temp.dtype}")
 
     mask = get_mask_t() > 0
     volume = np.where(mask, COST[np.newaxis, :, np.newaxis] * DZT[np.newaxis, np.newaxis, :], 0.0)
@@ -131,7 +145,7 @@ def main():
                 f.write(str(day))
             os.replace(day_file + ".tmp", day_file)
             if day % args.keep_days == 0 or day == last_day:
-                kept = os.path.join(REFERENCE_RESTART_DIR, f"reference_y{day // DAYS_PER_YEAR:04d}.restart.h5" if day % DAYS_PER_YEAR == 0 else f"reference_d{day:06d}.restart.h5")
+                kept = os.path.join(restart_dir, f"reference_y{day // DAYS_PER_YEAR:04d}.restart.h5" if day % DAYS_PER_YEAR == 0 else f"reference_d{day:06d}.restart.h5")
                 with open(checkpoint, "rb") as src, open(kept, "wb") as dst:
                     dst.write(src.read())
             rate = (time.time() - t0) / (day - day0)

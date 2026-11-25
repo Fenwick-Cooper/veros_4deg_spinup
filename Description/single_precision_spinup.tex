@@ -1,0 +1,75 @@
+\documentclass{article}
+    % General document formatting
+    \usepackage[margin=0.7in]{geometry}
+    \usepackage[parfill]{parskip}
+    \usepackage[utf8]{inputenc}
+
+    % Related to math
+    \usepackage{amsmath,amssymb,amsfonts,amsthm}
+
+    % Others
+    \usepackage{graphicx}
+    \usepackage{booktabs}
+    \usepackage{array}
+    \usepackage{float}
+    \usepackage{url}
+    \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+\title{Single against double precision in a 2000-year spin-up of 4$^\circ$ Veros}
+\author{Fenwick C. Cooper$^1$}
+\date{%
+    $^1$University of Oxford, UK \\[2ex]
+    \today
+}
+\begin{document}
+\maketitle
+
+This document, and the code and computations it reports, were produced almost entirely by the AI assistant Claude, following the human author's instructions over several iterations. The human author reviewed the text for clarity, relevance and quality, and takes responsibility for its content. Everything is specific to the setup in \url{https://past2future.org/2026/09/11/ocean-model-spin-up-competition/}.
+The score, the 200-year state and the 2000-year reference run are described in \texttt{coupled\_spinup.tex}. Years are 360 model days throughout.
+
+%======================================================================
+\section{Summary}\label{sec:summary}
+
+Running the 2000-year reference run of 4$^\circ$ Veros in single precision (float32) instead of double precision (float64):
+\begin{itemize}
+\item \textbf{The competition criterion is never met.} The temperature score of the single-precision run stops falling at about $2\times10^{-5}$ by year 10 and stays there for the remaining 1990 years. Its lowest value in 720\,000 days is $1.65\times10^{-5}$, so it never falls below $10^{-5}$. In double precision the score first falls below $10^{-5}$ on day 3714 and settles at about $2.6\times10^{-6}$.
+\item \textbf{The run ends in a different, warmer state.} At year 2000 the volume-mean temperature is 0.056~$^\circ$C higher than in double precision, and the ocean below 3000~m is 0.10--0.12~$^\circ$C warmer. The difference grows for about 1500 years and is not random: the single-precision run is warmer at every depth except near 2000~m.
+\item \textbf{The saving is small.} On the Apple M3 CPU a model day took 0.0249~s in single precision and 0.0311~s in double precision, a factor of 1.25.
+\end{itemize}
+
+%======================================================================
+\section{Setup}\label{sec:setup}
+
+Both runs start from \texttt{Init\_state.restart.h5} and step the 4$^\circ$ competition configuration (\texttt{global\_4deg\_no\_cycle.py}: uniform salinity, $\Delta t_\text{tracer}=86\,400$~s, $\Delta t_\text{mom}=1800$~s) for 2000 years with \texttt{run\_2000yr\_reference.py}. The single-precision run differs only in two environment variables: \texttt{VEROS\_FLOAT\_TYPE=float32}, and \texttt{VEROS\_USE\_SPECIAL\_TDMA=0}. Veros's compiled tridiagonal solver rejects single precision, because of a dtype check in \texttt{veros/core/special/tdma\_.py}, so this run uses Veros's pure-JAX solver instead. The pressure (streamfunction) solver is SciPy's BiCGSTAB in both runs, and it works in double precision either way. Everything else, the model state included, is single precision in one run and double in the other. Both runs used JAX on the CPU of an Apple M3 Pro.
+
+The temperature score is that of the competition,
+\begin{equation*}
+\text{score} = \frac{\lVert T_{n+1} - T_n \rVert}{\lVert T_n \rVert + \lVert T_0 \rVert},
+\end{equation*}
+with $T_n$ the temperature on day $n$, $T_0$ the initial temperature and $\lVert\cdot\rVert$ the unweighted $L^2$ norm over the grid. Both runs wrote the temperature every 10 years and a full restart file every 100 years.
+
+%======================================================================
+\section{Results}\label{sec:results}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{reference_2000yr_float32.png}
+\caption{The 2000-year 4$^\circ$ run in double (blue) and single (orange) precision, from the same initial state. (a) Temperature score: every day for the first year, then the median of each 36 days. (b) Volume-mean temperature. (c) RMS distance from the double-precision year-2000 state; the dashed line marks the single-precision run's final distance. (d) Single minus double precision, mean over each model level, at years 100, 500, 1000 and 2000 (light to dark).}
+\label{fig:compare}
+\end{figure}
+
+%======================================================================
+\section{Interpretation}\label{sec:interpretation}
+
+The single-precision run kept drifting, at about the same rate as the double-precision run, but towards a warmer state. Together with the noise in the score, this suggests that rounding errors act as an additional, spurious mixing: noise in each day's temperature change, mixed vertically, would warm the deep ocean. This has not been tested. Whatever the cause, the error is systematic: it is a bias in the state, not only a loss of precision in its drift.
+
+%======================================================================
+\section{Files}\label{sec:files}
+
+All in \texttt{code/}:
+\begin{itemize}
+\item \texttt{run\_2000yr\_reference.py}: both runs. Its option \texttt{-{}-float32} sets the two environment variables. The runs write to \texttt{data/intermediate/}, in \texttt{reference\_2000yr/} and \texttt{reference\_2000yr\_float32/}.
+\item \texttt{compare\_2000yr\_float32.py}: the comparison. It writes \texttt{comparison.npz} into the single-precision run's directory.
+\item \texttt{plot\_2000yr\_float32.py}: Figure~\ref{fig:compare}.
+\end{itemize}
+
+\end{document}
